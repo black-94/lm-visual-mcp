@@ -124,12 +124,17 @@ class CliProvider:
         )
 
     @staticmethod
-    def _media_instructions(request: VisionRequest) -> str:
-        """Build the media mapping block appended to the user prompt for CLI agents."""
+    def _media_instructions(request: VisionRequest, base_dir: Optional[Path] = None) -> str:
+        """Build the media mapping block appended to the user prompt for CLI agents.
+
+        ``base_dir`` is the directory the agent will run in (its cwd). When given,
+        images are referenced relative to it (e.g. AGY cds into the media dir);
+        otherwise they are referenced relative to ``request.workdir``.
+        """
         lines = []
         for i, img in enumerate(request.images):
             if img.local_path:
-                rel = _relative_to_workdir(Path(img.local_path), request.workdir)
+                rel = _relative_to(Path(img.local_path), base_dir or request.workdir)
                 lines.append(
                     f"IMAGE {i}: {rel}\n"
                     f"You MUST actually inspect this image file. "
@@ -145,7 +150,18 @@ class CliProvider:
         return "\n\nAttached media to inspect:\n" + "\n\n".join(lines)
 
     @staticmethod
-    def _wrap_json_instruction(prompt: str) -> str:
+    def _wrap_json_instruction(prompt: str, *, schema: bool) -> str:
+        """Append a JSON-instruction when a schema is actually enforced.
+
+        The "matching exactly this schema" phrasing badly misdirects CLI models
+        (notably AGY) when no schema is passed — it sends them reaching for a
+        tool to produce the JSON and they error out. So only add it when the
+        caller truly passes a schema (e.g. AGY ``--json-schema`` / codex
+        ``--output-schema``); otherwise leave the prompt untouched and let the
+        provider's ``--output-format json`` framing do the work.
+        """
+        if not schema:
+            return prompt
         return (
             prompt
             + "\n\nYou MUST respond with a single JSON object matching exactly this schema. "
@@ -153,10 +169,10 @@ class CliProvider:
         )
 
 
-def _relative_to_workdir(path: Path, workdir: Optional[Path]) -> str:
+def _relative_to(path: Path, base: Optional[Path]) -> str:
     try:
-        if workdir is not None:
-            return path.relative_to(workdir).as_posix()
+        if base is not None:
+            return path.relative_to(base).as_posix()
     except ValueError:
         pass
     return path.as_posix()

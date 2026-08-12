@@ -1,28 +1,55 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 .venv/
+venv/
+env/
 dist/
 build/
 *.egg-info/
+.eggs/
+*.so
+*.pyd
+.python-version
 
-# Env
+# Env / secrets
 .env
 .env.*
+!.env.example
 *.key
+*.pem
+*.crt
+*.p12
 
 # Test / tooling
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+.xmlcov/
 .mypy_cache/
 .ruff_cache/
+.pyre/
+.pytype/
+.coverage.*
 
-# OS
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 .DS_Store
 
-# Runtime
-.vision-mcp/
+# Packaging
+*.whl
+*.tar.gz
+*.zip
 
-.idea
-.vscode
+# Logs
+*.log
+logs/
+
+# Runtime (per-task staging dir written by the server into a configured workdir)
+.lm-visual-mcp/

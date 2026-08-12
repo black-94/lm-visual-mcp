@@ -62,6 +62,15 @@ uv pip install -e ".[dev]"   # dev = pytest, pytest-asyncio, Pillow (for doctor 
 
 ## Quick start
 
+First verify the install:
+
+```bash
+lm-visual-mcp --version    # confirm the binary is on PATH
+lm-visual-mcp doctor       # inspect the 4 providers: enabled / executable / model
+```
+
+Then copy the example config and edit it to suit your machine:
+
 ```bash
 # Copy the example config and edit it to suit your machine.
 cp config.example.yaml ~/.config/lm-visual-mcp/config.yaml
@@ -100,19 +109,23 @@ providers:
   agy:
     enabled: true
     command: agy
-    model: null
+    model: gemini-3.6-flash
+    effort: high
   codex:
     enabled: true
     command: codex
-    model: null
+    model: gpt-5.6-luna
+    effort: high
   gemini:
     enabled: true
-    model: null
+    model: gemini-3.6-flash
+    effort: high
     api_key_env: GEMINI_API_KEY
   opencode:
     enabled: true
     command: opencode
     model: null
+    effort: null
 
 runtime:
   workdir: null          # null => temporary dir per task
@@ -163,6 +176,27 @@ providers:
 ```
 
 Set a model to `null` to let the provider use its own default.
+
+### Provider effort
+
+Each provider's reasoning effort is configured with `effort`
+(`low` | `medium` | `high` | `xhigh`, provider-dependent; `null` = provider
+default). It is passed through to the backing CLI/API at runtime:
+
+- **AGY** → `--effort` (AGY model names embed effort, so a bare base model like
+  `gemini-3.6-flash` requires an explicit `--effort`; `gemini-3.6-flash` +
+  `high` resolves to "Gemini 3.6 Flash (High)").
+- **Codex** → `-c model_reasoning_effort=<effort>`.
+- **Gemini** → `thinking_config` (thinking level).
+- **OpenCode** → `--variant`.
+
+```yaml
+providers:
+  agy:      { model: gemini-3.6-flash, effort: high }
+  codex:    { model: gpt-5.6-luna,     effort: high }
+  gemini:   { model: gemini-3.6-flash, effort: high }
+  opencode: { model: null,             effort: null }
+```
 
 ### Gemini API key
 
@@ -272,23 +306,28 @@ lm-visual-mcp --version
 ## Provider detection
 
 - **AGY**: `agy -p "<prompt>" --output-format json`. Images are staged into the
-  workspace and read natively via `--add-dir` (relative path reference). AGY's
-  vision capability is probed once per process; if headless AGY auto-denies a
-  tool permission it needs to read the image, that request raises
-  `unsupported_media` and falls back, while later requests still get a real AGY
-  try.
+  workspace media dir and referenced by bare filename. AGY ignores the shell cwd
+  and always runs its tools in its own workspace, so the media dir is registered
+  with `--add-dir` (repeatable); files in an added dir are readable natively —
+  no `read_file` grant, no `command(ls)` grant, and never `command(*)`. The
+  server launches AGY in a sandbox (`--sandbox`) so any command it runs is
+  confined. There is no separate vision probe: every image request is exactly
+  one real AGY call, and vision capability is discovered from that call's result
+  and cached. If headless AGY produces no output (a tool permission it needs was
+  auto-denied), the request raises `unsupported_media` and falls back, and the
+  result is cached so later image requests fail fast instead of re-calling AGY.
 - **Codex**: `codex exec -i <img> ... --output-schema ... -s read-only`. Images
   passed natively; read-only sandbox enforced.
 - **Gemini**: `google-genai`, structured JSON, multi-image, configured model.
 - **OpenCode**: `opencode run --format json`, images via `--file`, JSON event
   stream parsed for the final assistant result.
 
-> **AGY non-determinism**: AGY reads workspace images natively via `--add-dir`.
-> However, as of AGY CLI 1.1.x, headless mode is non-deterministic — a run may
-> intermittently need a `read_file`/`command` tool permission that headless mode
-> auto-denies. When that happens the server detects it and transparently falls
-> back to the next provider. `lm-visual-mcp doctor --probe` reports the capability
-> without failing the server.
+> **AGY non-determinism**: AGY reads images from the dir registered with
+> `--add-dir`. As of AGY CLI 1.1.x, headless mode is still non-deterministic — a
+> run may intermittently reach for a tool permission it does not hold. When that
+> happens the server detects it and transparently falls back to the next
+> provider. `lm-visual-mcp doctor --probe` reports the capability without failing
+> the server.
 
 ## Security
 
@@ -309,10 +348,13 @@ genai mocked), Z.AI tool-schema compatibility, and an MCP `tools/list` +
 
 ## Troubleshooting
 
-- **`agy` falls back to codex for images** — AGY reads workspace images via
-  `--add-dir`, but headless mode is non-deterministic and may intermittently
-  auto-deny a tool permission. That is expected; the server falls back
-  transparently. Run `lm-visual-mcp doctor --probe` to exercise AGY directly.
+- **`agy` falls back to codex for images** — AGY reads images from the dir
+  registered with `--add-dir` (the media dir is added automatically). Headless
+  mode is non-deterministic and may intermittently auto-deny a tool permission.
+  The media dir is readable natively, so no `read_file` or `command(ls)` grant
+  is needed and `command(*)` must never be configured. When AGY still fails, the
+  server falls back transparently. Run `lm-visual-mcp doctor --probe` to exercise
+  AGY directly.
 - **Nothing responds** — no provider is `enabled`. Enable providers in config.
 - **Gemini not used** — an API key is required; see "Gemini API key".
 - **Codex blocks on stdin** — the server always closes stdin for CLI providers.

@@ -1,37 +1,39 @@
 """AGY provider.
 
 Runs ``agy -p "<prompt>" --output-format json``. AGY headless has no first-class
-image flag; images are staged into the workspace and referenced by relative
-path in the prompt. Vision capability is probed once per process and cached; if
-AGY genuinely produced no output (``no output produced``), image requests raise
-UNSUPPORTED_MEDIA and the router falls back to the next provider.
+image flag; images are staged into the workspace media dir and referenced by
+bare filename in the prompt. Vision capability is probed once per process and
+cached; if AGY genuinely produced no output (``no output produced``), image
+requests raise UNSUPPORTED_MEDIA and the router falls back to the next provider.
 
-AGY reads workspace images fine via ``--add-dir``. Headless mode auto-denies
-``read_file`` / ``command`` because it cannot prompt for permission, so a run
-can intermittently produce no output when the model reaches for those tools.
-The server launches AGY in a sandbox (``--sandbox``) so that granting those
-tools for the workspace is safe: any shell command AGY runs is confined to the
-sandbox.
+AGY reads images from the directory registered with ``--add-dir``. AGY ignores
+the subprocess cwd and runs its tools in its own workspace, so the media dir must
+be added explicitly with ``--add-dir`` (repeatable) and the server does not cd
+into it. Files in an added directory are readable natively — no ``read_file``
+grant and no ``command(ls)`` grant are needed, and the operator must never
+configure ``command(*)``. The server additionally launches AGY in a sandbox
+(``--sandbox``) so any command it runs is confined.
+
+Vision capability is NOT probed separately — analyze() always runs a real AGY
+call, and if AGY genuinely produced no output (``no output produced``) the
+result is cached as UNSUPPORTED_MEDIA and later image requests fail fast while
+the router falls back to the next provider. Every image request is exactly one
+AGY call.
 """
 
 from __future__ import annotations
 
-import base64
-import tempfile
+import logging
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("lm_visual_mcp.providers.agy")
 
 from ..errors import ProviderUnavailableError
 from ..models import ProviderFailureReason, VisionRequest
 from ..services.json_output import extract_json
 from ..services.subprocess_runner import SubprocessInvocation, SubprocessResult
 from .cli import CliProvider
-
-# 1x1 transparent PNG embedded so capability probing needs no Pillow.
-_ONE_PX_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
-    "YAAAAAYAAjCB0C8AAAAASUVORK5CYII="
-)
 
 
 class AgyProvider(CliProvider):
@@ -52,46 +54,18 @@ class AgyProvider(CliProvider):
 
     # -- probe -------------------------------------------------------------
     async def check_vision_capability(self, request: Optional[VisionRequest]) -> str:
+        """Return the cached AGY vision capability without running AGY.
+
+        Deliberately does NOT trigger a probe here. analyze() always runs a real
+        AGY call regardless of the probe result, so a separate probe would add a
+        redundant AGY call on the first image request (2x). Capability is instead
+        discovered from the real analyze result and cached in parse_output, so
+        every image request is exactly one AGY call and unsupported is still
+        fail-fast after the first real failure.
+        """
         if request is None or (not request.images and not request.videos):
             return "unknown"
-        if self._vision_capability is not None:
-            return self._vision_capability
-        self._vision_capability = await self._probe_vision_once()
-        return self._vision_capability
-
-    async def _probe_vision_once(self) -> str:
-        """Run AGY on a tiny image once to learn whether it can read images.
-
-        Must mirror the real ``build_invocation`` exactly, including
-        ``--add-dir``: AGY reads staged images relative to a workspace that is
-        added to its allowed directories. Without ``--add-dir`` the probe would
-        (wrongly) report unsupported even though the real path works.
-        """
-        with tempfile.TemporaryDirectory(prefix="agy-probe-") as td:
-            probe_dir = Path(td)
-            (probe_dir / "input").mkdir()
-            img = probe_dir / "input" / "probe.png"
-            img.write_bytes(_ONE_PX_PNG)
-            invocation = SubprocessInvocation(
-                exe=self.command,
-                args=[
-                    "-p",
-                    "Look at the image input/probe.png and answer with the JSON {\"answer\":\"ok\"}.",
-                    "--output-format",
-                    "json",
-                    "--add-dir",
-                    str(probe_dir),
-                    "--sandbox",
-                ],
-                cwd=probe_dir,
-                timeout=min(self.timeout, 60.0),
-            )
-            result = await self.runner.run(invocation)
-        if self._looks_unsupported(result):
-            return "unsupported"
-        if result.returncode == 0 and (result.stdout or result.stderr):
-            return "available"
-        return "unknown"
+        return self._vision_capability or "unknown"
 
     @staticmethod
     def _looks_unsupported(result: SubprocessResult) -> bool:
@@ -109,13 +83,10 @@ class AgyProvider(CliProvider):
 
     # -- analyze -----------------------------------------------------------
     async def analyze(self, request: VisionRequest) -> object:
-        # Always attempt a real AGY call. AGY can read workspace images (via
-        # --add-dir); it is non-deterministic in headless mode and may
-        # intermittently need a tool permission it cannot grant. Such a runtime
-        # denial surfaces in parse_output as UNSUPPORTED_MEDIA and caches here
-        # so subsequent image requests fail fast. We do NOT short-circuit a
-        # probe result here — a single flaky probe run must not permanently
-        # disable AGY for the process.
+        # Every image request is exactly one real AGY call. AGY is
+        # non-deterministic in headless mode; a runtime failure surfaces in
+        # parse_output as UNSUPPORTED_MEDIA and caches here so subsequent image
+        # requests fail fast while the router falls back to the next provider.
         if (request.images or request.videos) and self._vision_capability == "unsupported":
             raise ProviderUnavailableError(
                 ProviderFailureReason.UNSUPPORTED_MEDIA,
@@ -123,10 +94,27 @@ class AgyProvider(CliProvider):
             )
         return await super().analyze(request)
 
+    @staticmethod
+    def _media_dir(request: VisionRequest) -> Path:
+        """Directory to register with ``--add-dir`` = the one holding the images.
+
+        AGY ignores the subprocess cwd and always runs its tools in its own
+        workspace, so the media dir must be added explicitly. Registering it
+        makes the staged images readable by bare filename with no ``read_file``
+        or ``command`` grant.
+        """
+        for img in request.images:
+            if img.local_path:
+                return Path(img.local_path).parent
+        if request.workdir is not None:
+            return request.workdir
+        return Path.cwd()
+
     def build_invocation(self, request: VisionRequest) -> SubprocessInvocation:
-        prompt = self._media_instructions(request)
+        media_dir = self._media_dir(request)
+        prompt = self._media_instructions(request, base_dir=media_dir)
         user_prompt = (request.user_prompt + "\n\n" + prompt).strip()
-        user_prompt = self._wrap_json_instruction(user_prompt)
+        user_prompt = self._wrap_json_instruction(user_prompt, schema=bool(request.output_schema))
 
         args = ["-p", user_prompt, "--output-format", "json"]
         if request.output_schema:
@@ -137,19 +125,20 @@ class AgyProvider(CliProvider):
             args += ["--model", self.model]
         if self.effort:
             args += ["--effort", self.effort]
-        if request.workdir is not None:
-            args += ["--add-dir", str(request.workdir)]
-        # Run in a sandbox so granting read_file/command for the workspace is
-        # safe: any shell command AGY runs is confined rather than executed on
-        # the host. Sandboxing alone does not auto-approve tools — the grants
-        # live in AGY's permission config — but together they make headless
-        # image reads reliable (the model may pick read_file or command).
+        # Register the media dir so AGY can read the staged images by bare
+        # filename. Files in an added dir are readable natively — no read_file
+        # grant and no command(ls) grant required, and never command(*).
+        args += ["--add-dir", str(media_dir)]
+        # Run in a sandbox so any command AGY runs is confined.
         args += ["--sandbox"]
 
+        # No cd into the media dir: AGY ignores the subprocess cwd (it runs its
+        # tools in its own workspace) and reads the images via --add-dir, so a
+        # forced cwd is redundant. Leave cwd unset (inherit the server's).
         return SubprocessInvocation(
             exe=self.command,
             args=args,
-            cwd=request.workdir,
+            cwd=None,
             timeout=request.timeout or self.timeout,
         )
 
@@ -189,6 +178,14 @@ class AgyProvider(CliProvider):
                 return {"answer": response.strip()}
             except Exception:  # noqa: BLE001
                 return {"answer": response.strip()}
+        # rc=0 but no useful response (the pure non-determinism case, distinct from
+        # the "no output produced" case handled above). Not an error — it returns
+        # an empty answer — but log it so it is not silent.
+        logger.warning(
+            "agy returned no parseable output (rc=%s, stderr=%r)",
+            result.returncode,
+            (result.stderr or "")[:300],
+        )
         return {"answer": "", "warnings": ["agy returned no parseable output"]}
 
     @staticmethod

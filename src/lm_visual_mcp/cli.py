@@ -141,7 +141,6 @@ def _probe_agy(cfg, pc) -> None:
 
     provider = AgyProvider(command=pc.command, model=pc.model, timeout=cfg.runtime.timeout,
                            runner=SubprocessRunner())
-    cap = asyncio.run(provider.check_vision_capability(None))
 
     # Build a real test image and ask AGY to read it.
     import tempfile

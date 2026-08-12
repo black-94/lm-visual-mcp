@@ -84,3 +84,30 @@ async def test_gemini_rejects_video():
     with pytest.raises(ProviderUnavailableError) as ei:
         await p.analyze(req)
     assert ei.value.reason == ProviderFailureReason.UNSUPPORTED_MEDIA
+
+
+class RecordingMessages:
+    response = FakeResponse()
+    calls = []
+
+    class models:
+        @staticmethod
+        async def generate_content(model, contents, config):
+            RecordingMessages.calls.append((model, config))
+            return RecordingMessages.response
+
+
+class RecordingClient:
+    aio = RecordingMessages()
+
+
+async def test_gemini_effort_maps_to_thinking_config(tmp_path):
+    from lm_visual_mcp.providers.gemini import GeminiProvider
+    _png(tmp_path)
+    RecordingMessages.calls = []
+    rc = RecordingClient()
+    p = GeminiProvider(model="gemini-3.6-flash", effort="high", api_key="k", client=rc)
+    await p.analyze(_req(tmp_path=tmp_path))
+    model, config = RecordingMessages.calls[0]
+    assert model == "gemini-3.6-flash"
+    assert config.thinking_config.thinking_level == "HIGH"

@@ -57,7 +57,7 @@ class OpenCodeProvider(CliProvider):
 
         prompt = self._media_instructions(request)
         user_prompt = (request.user_prompt + "\n\n" + prompt).strip()
-        user_prompt = self._wrap_json_instruction(user_prompt)
+        user_prompt = self._wrap_json_instruction(user_prompt, schema=False)
         args.append(user_prompt)
 
         return SubprocessInvocation(

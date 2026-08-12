@@ -20,6 +20,21 @@ def test_defaults() -> None:
     assert cfg.providers.agy.enabled is True
 
 
+def test_example_config_model_and_effort() -> None:
+    # The shipped example pins explicit model + effort for agy/codex/gemini.
+    import os
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[1] / "config.example.yaml"
+    cfg = load_config(config_path=str(example), env={})
+    assert cfg.providers.agy.model == "gemini-3.6-flash"
+    assert cfg.providers.agy.effort == "high"
+    assert cfg.providers.codex.model == "gpt-5.6-luna"
+    assert cfg.providers.codex.effort == "high"
+    assert cfg.providers.gemini.model == "gemini-3.6-flash"
+    assert cfg.providers.gemini.effort == "high"
+
+
 def test_yaml_loading(tmp_path, monkeypatch) -> None:
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
