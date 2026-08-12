@@ -9,6 +9,7 @@ the result in the standard MCP response envelope.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from ..config import AppConfig
@@ -26,7 +27,7 @@ class VisionSession:
     def __init__(self, cfg: AppConfig, router: Optional[ProviderRouter] = None) -> None:
         self.cfg = cfg
         self.workspaces = WorkspaceManager(
-            base=cfg.runtime.workdir
+            base=Path(cfg.runtime.workdir) if cfg.runtime.workdir else None
         )
         self.media = MediaService(
             max_image_mb=cfg.media.max_image_mb,

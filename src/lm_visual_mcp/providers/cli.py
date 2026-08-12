@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -176,13 +174,3 @@ def _relative_to(path: Path, base: Optional[Path]) -> str:
     except ValueError:
         pass
     return path.as_posix()
-
-
-@contextlib.contextmanager
-def _write_schema_file(schema: dict, workdir: Path) -> Path:
-    path = workdir / "schema.json"
-    path.write_text(json.dumps(schema, indent=2), encoding="utf-8")
-    try:
-        yield path
-    finally:
-        pass

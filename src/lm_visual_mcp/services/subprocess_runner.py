@@ -107,6 +107,6 @@ def classify_cli_failure(result: SubprocessResult) -> Optional[ProviderFailureRe
         return ProviderFailureReason.QUOTA_EXHAUSTED
     if "not found" in combined and "command" in combined:
         return ProviderFailureReason.COMMAND_NOT_FOUND
-    if "permission denied" in combined or "permission" in combined and "denied" in combined:
+    if "permission denied" in combined or ("permission" in combined and "denied" in combined):
         return ProviderFailureReason.PERMISSION_DENIED
     return ProviderFailureReason.TEMPORARY_FAILURE

@@ -117,7 +117,7 @@ class OpenCodeProvider(CliProvider):
     @staticmethod
     def _classify(result: SubprocessResult) -> ProviderFailureReason:
         combined = (result.stderr + "\n" + result.stdout).lower()
-        if "not authenticated" in combined or "login" in combined and "required" in combined:
+        if "not authenticated" in combined or ("login" in combined and "required" in combined):
             return ProviderFailureReason.NOT_AUTHENTICATED
         if "quota" in combined or "rate limit" in combined:
             return ProviderFailureReason.QUOTA_EXHAUSTED
