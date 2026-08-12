@@ -82,6 +82,12 @@ lm-visual-mcp --config ~/.config/lm-visual-mcp/config.yaml
 python -m lm_visual_mcp --config ~/.config/lm-visual-mcp/config.yaml
 ```
 
+No matter how many Claude Code sessions open, only **one** shared daemon runs
+(global single instance on `runtime.host:runtime.port`). Each session's process
+probes for it, proxies to it if present, or auto-starts it, then reuses it.
+Requests beyond `runtime.max_concurrency` queue inside the daemon. The daemon
+exits itself after `runtime.idle_timeout_ms` of no traffic.
+
 ### MCP client configuration
 
 ```json
@@ -218,7 +224,10 @@ responses, and never included in exceptions. Prefer the environment variable.
 LM_VISUAL_MCP_CONFIG                 config file path
 LM_VISUAL_MCP_WORKDIR                runtime workdir
 LM_VISUAL_MCP_TIMEOUT                runtime timeout (s)
-LM_VISUAL_MCP_MAX_CONCURRENCY        max concurrency
+LM_VISUAL_MCP_MAX_CONCURRENCY        max concurrency (requests beyond this queue)
+LM_VISUAL_MCP_HOST                   singleton daemon bind host (default 127.0.0.1)
+LM_VISUAL_MCP_PORT                   singleton daemon bind port (default 6506)
+LM_VISUAL_MCP_IDLE_TIMEOUT_MS        daemon idle-exit timeout (default 300000)
 LM_VISUAL_MCP_AGY_COMMAND            agy executable
 LM_VISUAL_MCP_AGY_MODEL              agy model
 LM_VISUAL_MCP_AGY_EFFORT             agy reasoning effort

@@ -65,13 +65,30 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(doc, suppress_default=True)
     doc.add_argument("--probe", action="store_true",
                      help="Run a real AGY vision smoke test (requires Pillow + agy)")
+    daemon = sub.add_parser("daemon", help="Run as the shared single-instance daemon")
+    _add_common_args(daemon, suppress_default=True)
     return parser
 
 
-def _serve(cfg) -> int:
-    from .server import build_server
+def _serve(cfg, config_path: Optional[str]) -> int:
+    """Client mode: probe the shared daemon, start it if absent, then proxy.
 
-    mcp = build_server(cfg)
+    Presents the normal stdio MCP server to Claude Code; every tool call is
+    forwarded over loopback HTTP to the one global daemon.
+    """
+    from .server import build_server
+    from .services import ProxyVisionSession, probe_primary, start_primary
+
+    host, port = cfg.runtime.host, cfg.runtime.port
+    if not probe_primary(host, port):
+        logger.info("no shared daemon on %s:%s; starting one", host, port)
+        if not start_primary(cfg, config_path, host, port):
+            if not probe_primary(host, port):
+                logger.error("could not start shared daemon on %s:%s", host, port)
+                return 1
+
+    session = ProxyVisionSession(cfg, host, port, config_path=config_path)
+    mcp = build_server(cfg, session=session)
     mcp.run(transport="stdio")
     return 0
 
@@ -191,7 +208,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "doctor":
         return doctor(cfg, probe=args.probe)
 
-    return _serve(cfg)
+    if args.command == "daemon":
+        from .services import run_daemon
+
+        return run_daemon(cfg)
+
+    return _serve(cfg, args.config)
 
 
 if __name__ == "__main__":

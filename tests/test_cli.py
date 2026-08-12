@@ -27,3 +27,15 @@ def test_default_config_is_none() -> None:
     args = build_parser().parse_args(["doctor"])
     assert args.config is None
     assert args.log_level is None
+
+
+def test_daemon_subcommand() -> None:
+    args = build_parser().parse_args(["--config", "a.yaml", "daemon"])
+    assert args.command == "daemon"
+    assert args.config == "a.yaml"
+
+
+def test_daemon_config_after_subcommand() -> None:
+    args = build_parser().parse_args(["daemon", "--config", "a.yaml"])
+    assert args.command == "daemon"
+    assert args.config == "a.yaml"

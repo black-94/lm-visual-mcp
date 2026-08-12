@@ -8,6 +8,7 @@ the result in the standard MCP response envelope.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,10 @@ class VisionSession:
             max_download_mb=cfg.media.max_download_mb,
         )
         self.router = router or ProviderRouter(cfg)
+        # Serializes request execution across every caller (all MCP sessions in
+        # the shared daemon funnel through this one session). Requests beyond
+        # runtime.max_concurrency queue here; set it to 1 for strict serial.
+        self._sem = asyncio.Semaphore(cfg.runtime.max_concurrency)
 
     # -- image tool ---------------------------------------------------------
     async def analyze_images(
@@ -79,14 +84,32 @@ class VisionSession:
         video_sources: Optional[list[str]] = None,
         output_type: Optional[str] = None,
     ) -> dict:
+        async with self._sem:
+            return await self._run_locked(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_sources=image_sources or [],
+                video_sources=video_sources or [],
+                output_type=output_type,
+            )
+
+    async def _run_locked(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        image_sources: list[str],
+        video_sources: list[str],
+        output_type: Optional[str] = None,
+    ) -> dict:
         workspace = self.workspaces.create()
         try:
             request = self._build_request(
                 workspace=workspace,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                image_sources=image_sources or [],
-                video_sources=video_sources or [],
+                image_sources=image_sources,
+                video_sources=video_sources,
             )
             routed = await self.router.route(request)
             return self._envelope(routed)
