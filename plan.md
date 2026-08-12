@@ -973,37 +973,10 @@ extract / repair
 
 禁止无限 retry。
 
----
-
-# 二十、不要实现 ACP
-
-第一版：
-
-```text
-NO ACP
-```
-
-不要创建：
-
-```text
-transports/
-acp/
-AcpClient
-ACP dependency
-```
-
-以后如果需要：
-
-```python
-class AcpProvider(VisionProvider):
-    ...
-```
-
-直接作为新的 Provider 即可。
 
 ---
 
-# 二十一、完整兼容 Z.AI Vision MCP Tool 接口
+# 二十、完整兼容 Z.AI Vision MCP Tool 接口
 
 必须实现以下 8 个主要 Tool。
 
@@ -1249,7 +1222,7 @@ UNSUPPORTED_MEDIA
 
 ---
 
-# 二十二、Prompt Layer
+# 二十一、Prompt Layer
 
 不要所有工具共用一个 generic prompt。
 
@@ -1291,7 +1264,7 @@ Provider 只接收最终 VisionRequest。
 
 ---
 
-# 二十三、统一结构化输出
+# 二十二、统一结构化输出
 
 所有视觉 Provider 最终统一为类似：
 
@@ -1359,7 +1332,7 @@ details
 
 ---
 
-# 二十四、MCP 最终 Response Envelope
+# 二十三、MCP 最终 Response Envelope
 
 返回：
 
@@ -1423,7 +1396,7 @@ credential
 
 ---
 
-# 二十五、为什么 Provider 信息可以出现在 Response
+# 二十四、为什么 Provider 信息可以出现在 Response
 
 Tool 不允许 LLM 控制 Provider。
 
@@ -1446,7 +1419,7 @@ usage
 
 ---
 
-# 二十六、MCP Server 启动
+# 二十五、MCP Server 启动
 
 必须支持：
 
@@ -1485,7 +1458,7 @@ stdout 专用于 MCP protocol。
 
 ---
 
-# 二十七、日志
+# 二十六、日志
 
 所有日志必须进入：
 
@@ -1526,7 +1499,7 @@ Prompt DEBUG logging：
 
 ---
 
-# 二十八、Doctor
+# 二十七、Doctor
 
 实现：
 
@@ -1574,7 +1547,7 @@ Runtime
 
 ---
 
-# 二十九、AGY Vision Smoke Test
+# 二十八、AGY Vision Smoke Test
 
 如果本机有：
 
@@ -1627,7 +1600,7 @@ vision capability: unsupported
 
 ---
 
-# 三十、测试
+# 二十九、测试
 
 必须完整测试。
 
@@ -1735,7 +1708,7 @@ video_analysis
 
 ---
 
-# 三十一、MCP Smoke Test
+# 三十、MCP Smoke Test
 
 必须实际验证：
 
@@ -1770,7 +1743,7 @@ tools/call
 
 ---
 
-# 三十二、安全
+# 三十一、安全
 
 Vision MCP 的职责：
 
@@ -1811,7 +1784,7 @@ AGY/OpenCode 不开启危险自动授权。
 
 ---
 
-# 三十三、README
+# 三十二、README
 
 README 至少覆盖：
 
@@ -1843,15 +1816,13 @@ README 至少覆盖：
 
 ---
 
-# 三十四、第一版不要实现的功能
+# 三十三、第一版不要实现的功能
 
 明确不实现：
 
 ```text
 ACP
-Transport abstraction
 profile system
-动态修改 Server 配置的 MCP Tool
 让模型选择 Provider
 让模型选择模型
 Tool API Key
@@ -1866,7 +1837,7 @@ Web 管理界面
 
 ---
 
-# 三十五、未来扩展必须容易
+# 三十四、未来扩展必须容易
 
 Provider 抽象需要保证未来可以简单增加：
 
@@ -1896,7 +1867,7 @@ class NewProvider(VisionProvider):
 
 ---
 
-# 三十六、开发执行顺序
+# 三十五、开发执行顺序
 
 请直接执行：
 
@@ -1933,7 +1904,7 @@ class NewProvider(VisionProvider):
 
 ---
 
-# 三十七、完成标准
+# 三十六、完成标准
 
 以下必须成功：
 
@@ -1977,7 +1948,7 @@ tools/call
 
 ---
 
-# 三十八、最终汇报
+# 三十七、最终汇报
 
 全部完成后，再给出：
 
