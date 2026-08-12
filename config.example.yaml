@@ -1,0 +1,55 @@
+version: 1
+
+providers:
+  order:
+    - agy
+    - codex
+    - gemini
+    - opencode
+
+  agy:
+    enabled: true
+    command: agy
+    model: gemini 3.6 flash
+
+  codex:
+    enabled: true
+    command: codex
+    model: gpt 5.6 luna
+
+  gemini:
+    enabled: true
+    model: null
+    api_key_env: GEMINI_API_KEY
+    # For compatibility only — prefer api_key_env / environment variable.
+    # api_key: "never-commit-a-plain-text-key"
+
+  opencode:
+    enabled: true
+    command: opencode
+    model: null
+
+runtime:
+  workdir: null
+  timeout: 120
+  max_concurrency: 2
+
+fallback:
+  enabled: true
+  on:
+    - command_not_found
+    - not_authenticated
+    - api_key_missing
+    - quota_exhausted
+    - unsupported_media
+    - timeout
+    - temporary_failure
+
+media:
+  max_image_mb: 20
+  max_video_mb: 8
+  download_timeout: 30
+  max_download_mb: 32
+
+logging:
+  level: INFO
