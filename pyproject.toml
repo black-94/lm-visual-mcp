@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vision-mcp"
+name = "lm-visual-mcp"
 version = "0.1.0"
 description = "Vision MCP Server: give text-only LLMs / coding agents visual capabilities via MCP."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
-authors = [{ name = "vision-mcp contributors" }]
+authors = [{ name = "lm-visual-mcp contributors" }]
 keywords = ["mcp", "vision", "vlm", "llm", "ai", "zai"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -33,10 +33,10 @@ dev = [
 ]
 
 [project.scripts]
-vision-mcp = "vision_mcp.cli:main"
+lm-visual-mcp = "lm_visual_mcp.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/vision_mcp"]
+packages = ["src/lm_visual_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

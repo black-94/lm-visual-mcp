@@ -25,21 +25,26 @@ __all__ = [
 def build_provider(name: str, provider_cfg: ProviderConfig, cfg: AppConfig, runner=None) -> VisionProvider:
     """Construct a single provider from its config block."""
     timeout = cfg.runtime.timeout
+    effort = provider_cfg.effort
     if name == "agy":
         return AgyProvider(
-            command=provider_cfg.command, model=provider_cfg.model, timeout=timeout, runner=runner
+            command=provider_cfg.command, model=provider_cfg.model, effort=effort,
+            timeout=timeout, runner=runner,
         )
     if name == "codex":
         return CodexProvider(
-            command=provider_cfg.command, model=provider_cfg.model, timeout=timeout, runner=runner
+            command=provider_cfg.command, model=provider_cfg.model, effort=effort,
+            timeout=timeout, runner=runner,
         )
     if name == "gemini":
         return GeminiProvider(
-            model=provider_cfg.model, api_key=provider_cfg.effective_api_key(), timeout=timeout
+            model=provider_cfg.model, effort=effort,
+            api_key=provider_cfg.effective_api_key(), timeout=timeout,
         )
     if name == "opencode":
         return OpenCodeProvider(
-            command=provider_cfg.command, model=provider_cfg.model, timeout=timeout, runner=runner
+            command=provider_cfg.command, model=provider_cfg.model, effort=effort,
+            timeout=timeout, runner=runner,
         )
     raise ValueError(f"unknown provider: {name}")
 

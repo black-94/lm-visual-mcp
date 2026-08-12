@@ -25,6 +25,7 @@ class ProviderFailureReason(enum.StrEnum):
     UNSUPPORTED_MEDIA = "unsupported_media"
     TIMEOUT = "timeout"
     TEMPORARY_FAILURE = "temporary_failure"
+    PERMISSION_DENIED = "permission_denied"
 
     # NOT fallback-eligible by default.
     INVALID_INPUT = "invalid_input"
@@ -41,6 +42,7 @@ class ProviderFailureReason(enum.StrEnum):
             cls.UNSUPPORTED_MEDIA,
             cls.TIMEOUT,
             cls.TEMPORARY_FAILURE,
+            cls.PERMISSION_DENIED,
         }
 
 
@@ -130,7 +132,7 @@ class ProviderResult:
     """Structured output + usage returned by a single provider."""
 
     provider: str
-    # The unified structured result (see vision_mcp.schema.VisionResult).
+    # The unified structured result (see lm_visual_mcp.schema.VisionResult).
     result: dict
     model: Optional[str] = None
     usage: ProviderUsage = field(default_factory=ProviderUsage)

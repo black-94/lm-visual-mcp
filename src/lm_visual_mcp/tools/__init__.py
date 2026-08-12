@@ -19,7 +19,7 @@ from ..router import ProviderRouter, RoutedResponse
 from ..schema import VISION_RESULT_SCHEMA
 from ..services import MediaService, Workspace, WorkspaceManager
 
-logger = logging.getLogger("vision_mcp.tools")
+logger = logging.getLogger("lm_visual_mcp.tools")
 
 
 class VisionSession:

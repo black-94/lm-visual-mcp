@@ -43,10 +43,11 @@ class AgyProvider(CliProvider):
         *,
         command: Optional[str] = None,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         timeout: float = 120.0,
         runner=None,
     ) -> None:
-        super().__init__(command=command, model=model, timeout=timeout, runner=runner)
+        super().__init__(command=command, model=model, effort=effort, timeout=timeout, runner=runner)
         self._vision_capability: Optional[str] = None
 
     # -- probe -------------------------------------------------------------
@@ -80,6 +81,7 @@ class AgyProvider(CliProvider):
                     "json",
                     "--add-dir",
                     str(probe_dir),
+                    "--sandbox",
                 ],
                 cwd=probe_dir,
                 timeout=min(self.timeout, 60.0),
@@ -133,8 +135,16 @@ class AgyProvider(CliProvider):
             args += ["--json-schema", json.dumps(request.output_schema)]
         if self.model:
             args += ["--model", self.model]
+        if self.effort:
+            args += ["--effort", self.effort]
         if request.workdir is not None:
             args += ["--add-dir", str(request.workdir)]
+        # Run in a sandbox so granting read_file/command for the workspace is
+        # safe: any shell command AGY runs is confined rather than executed on
+        # the host. Sandboxing alone does not auto-approve tools — the grants
+        # live in AGY's permission config — but together they make headless
+        # image reads reliable (the model may pick read_file or command).
+        args += ["--sandbox"]
 
         return SubprocessInvocation(
             exe=self.command,
@@ -189,7 +199,7 @@ class AgyProvider(CliProvider):
         if "quota" in combined or "rate limit" in combined:
             return ProviderFailureReason.QUOTA_EXHAUSTED
         if "permission" in combined:
-            return ProviderFailureReason.UNSUPPORTED_MEDIA
+            return ProviderFailureReason.PERMISSION_DENIED
         return ProviderFailureReason.TEMPORARY_FAILURE
 
 

@@ -10,16 +10,19 @@ providers:
   agy:
     enabled: true
     command: agy
-    model: gemini 3.6 flash
+    model: gemini-3.6-flash-medium
+    effort: null
 
   codex:
     enabled: true
     command: codex
-    model: gpt 5.6 luna
+    model: gpt-5.6-luna
+    effort: null
 
   gemini:
     enabled: true
-    model: null
+    model: gemini-3.6-flash
+    effort: null
     api_key_env: GEMINI_API_KEY
     # For compatibility only — prefer api_key_env / environment variable.
     # api_key: "never-commit-a-plain-text-key"
@@ -28,6 +31,7 @@ providers:
     enabled: true
     command: opencode
     model: null
+    effort: null
 
 runtime:
   workdir: null
@@ -39,6 +43,7 @@ fallback:
   on:
     - command_not_found
     - not_authenticated
+    - permission_denied
     - api_key_missing
     - quota_exhausted
     - unsupported_media

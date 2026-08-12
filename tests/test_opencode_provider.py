@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from vision_mcp.models import VisionRequest
-from vision_mcp.providers.opencode import OpenCodeProvider
-from vision_mcp.services.subprocess_runner import SubprocessResult
+from lm_visual_mcp.models import VisionRequest
+from lm_visual_mcp.providers.opencode import OpenCodeProvider
+from lm_visual_mcp.services.subprocess_runner import SubprocessResult
 
 
 class FakeRunner:
@@ -34,11 +34,18 @@ def test_opencode_extracts_assistant_text():
 
 def test_opencode_invocation_flags():
     res = SubprocessResult("/usr/bin/opencode", [], 0, "", "")
-    p = OpenCodeProvider(command="opencode", model="google/gemini", runner=FakeRunner(res))
+    p = OpenCodeProvider(command="opencode", model="google/gemini", effort="high", runner=FakeRunner(res))
     inv = p.build_invocation(_req())
     assert inv.args[0] == "run"
     assert "--format" in inv.args and "json" in inv.args
     assert "--model" in inv.args
+    assert "--variant" in inv.args and "high" in inv.args  # reasoning effort
+
+
+def test_opencode_classify_permission_denied():
+    from lm_visual_mcp.models import ProviderFailureReason
+    res = SubprocessResult("/usr/bin/opencode", [], 1, "", "error: permission denied")
+    assert OpenCodeProvider._classify(res) == ProviderFailureReason.PERMISSION_DENIED
 
 
 def test_opencode_no_result_raises():

@@ -3,7 +3,7 @@
 Each vision task gets an isolated working directory. When ``runtime.workdir``
 is ``None`` (the default) a brand-new temporary directory is created per task
 and cleaned up afterwards. When a project workdir is configured, task-specific
-media is staged under ``<workdir>/.vision-mcp/<uuid>/`` and removed on cleanup.
+media is staged under ``<workdir>/.lm-visual-mcp/<uuid>/`` and removed on cleanup.
 
 User files are never deleted and never modified.
 """
@@ -15,6 +15,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 from ..errors import ConfigError
 
@@ -62,7 +63,7 @@ class WorkspaceManager:
 
     def create(self) -> Workspace:
         if self.base is None:
-            root = Path(tempfile.mkdtemp(prefix="vision-mcp-"))
+            root = Path(tempfile.mkdtemp(prefix="lm-visual-mcp-"))
             return Workspace(
                 root=root,
                 input_dir=root / "input",
@@ -72,7 +73,7 @@ class WorkspaceManager:
             )
         if not self.base.is_dir():
             raise ConfigError(f"workdir is not a directory: {self.base}")
-        task = self.base / ".vision-mcp" / str(uuid.uuid4())
+        task = self.base / ".lm-visual-mcp" / str(uuid.uuid4())
         return Workspace(
             root=task,
             input_dir=task / "input",

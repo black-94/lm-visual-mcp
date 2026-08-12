@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from vision_mcp.errors import ProviderUnavailableError
-from vision_mcp.models import ImageInput, ProviderFailureReason, VisionRequest
-from vision_mcp.providers.gemini import GeminiProvider
+from lm_visual_mcp.errors import ProviderUnavailableError
+from lm_visual_mcp.models import ImageInput, ProviderFailureReason, VisionRequest
+from lm_visual_mcp.providers.gemini import GeminiProvider
 
 
 class FakeMeta:
@@ -77,7 +77,7 @@ async def test_gemini_missing_key_unavailable():
 
 
 async def test_gemini_rejects_video():
-    from vision_mcp.models import VideoInput
+    from lm_visual_mcp.models import VideoInput
     req = VisionRequest(system_prompt="s", user_prompt="u",
                         videos=[VideoInput(source="/tmp/v.mp4")])
     p = GeminiProvider(model="m", api_key="k", client=FakeClient())

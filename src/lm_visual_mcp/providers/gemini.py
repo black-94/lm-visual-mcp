@@ -26,11 +26,13 @@ class GeminiProvider(VisionProvider):
         self,
         *,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         api_key: Optional[str] = None,
         timeout: float = 120.0,
         client=None,
     ) -> None:
         self.model = model or DEFAULT_MODEL
+        self.effort = effort
         self._api_key = api_key
         self.timeout = timeout
         # client injectable for tests.
@@ -125,6 +127,10 @@ class GeminiProvider(VisionProvider):
         )
         if request.output_schema:
             config.response_schema = request.output_schema
+        if self.effort:
+            _EFFORT_MAP = {"low": "LOW", "medium": "MEDIUM", "high": "HIGH", "xhigh": "HIGH"}
+            level = _EFFORT_MAP.get(self.effort.lower(), self.effort.upper())
+            config.thinking_config = genai.types.ThinkingConfig(thinking_level=level)
 
         return await client.aio.models.generate_content(
             model=self.model,
@@ -153,7 +159,7 @@ class GeminiProvider(VisionProvider):
             )
         if "permission" in msg or "forbidden" in msg or "403" in msg:
             return ProviderUnavailableError(
-                ProviderFailureReason.NOT_AUTHENTICATED, "gemini permission denied"
+                ProviderFailureReason.PERMISSION_DENIED, "gemini permission denied"
             )
         if "quota" in msg or "429" in msg or "resource exhausted" in msg or "rate limit" in msg:
             return ProviderUnavailableError(

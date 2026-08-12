@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from .config import AppConfig
 from .tools import VisionSession
 
-logger = logging.getLogger("vision_mcp.server")
+logger = logging.getLogger("lm_visual_mcp.server")
 
 _TOOL_NAMES = (
     "ui_to_artifact",

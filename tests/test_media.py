@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from vision_mcp.errors import MediaError
-from vision_mcp.services import MediaService
+from lm_visual_mcp.errors import MediaError
+from lm_visual_mcp.services import MediaService
 
 
 @pytest.fixture

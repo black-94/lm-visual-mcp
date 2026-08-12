@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from vision_mcp.models import ImageInput, VisionRequest
-from vision_mcp.providers.codex import CodexProvider
-from vision_mcp.services.subprocess_runner import SubprocessResult
+from lm_visual_mcp.models import ImageInput, VisionRequest
+from lm_visual_mcp.providers.codex import CodexProvider
+from lm_visual_mcp.services.subprocess_runner import SubprocessResult
 
 
 class FakeRunner:
@@ -63,9 +63,25 @@ def test_codex_failure_rc():
 
 
 def test_codex_rejects_video():
-    from vision_mcp.models import VideoInput
+    from lm_visual_mcp.models import VideoInput
     req = VisionRequest(system_prompt="s", user_prompt="u", videos=[VideoInput(source="/tmp/v.mp4")])
     res = SubprocessResult("/usr/bin/codex", [], 0, "{}", "")
     p = _codex(res)
     with pytest.raises(Exception):
         p.build_invocation(req)
+
+
+def test_codex_effort_reaches_invocation(tmp_path):
+    from lm_visual_mcp.models import ProviderFailureReason
+    res = SubprocessResult("/usr/bin/codex", [], 0, "{}", "")
+    p = _codex(res, model="gpt-x", effort="high")
+    req = _req()
+    req.workdir = tmp_path
+    inv = p.build_invocation(req)
+    assert "-c" in inv.args and "model_reasoning_effort=high" in inv.args
+
+
+def test_codex_classify_permission_denied():
+    from lm_visual_mcp.models import ProviderFailureReason
+    res = SubprocessResult("/usr/bin/codex", [], 1, "", "permission denied: read-only sandbox")
+    assert CodexProvider._classify(res) == ProviderFailureReason.PERMISSION_DENIED

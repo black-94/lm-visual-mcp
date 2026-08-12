@@ -39,11 +39,13 @@ class CliProvider:
         *,
         command: Optional[str] = None,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         timeout: float = 120.0,
         runner: Optional[SubprocessRunner] = None,
     ) -> None:
         self.command = command or self.default_command
         self.model = model
+        self.effort = effort
         self.timeout = timeout
         self.runner = runner or SubprocessRunner()
 
@@ -117,7 +119,7 @@ class CliProvider:
     def _log_stderr(self, result: SubprocessResult) -> None:
         import logging
 
-        logging.getLogger("vision_mcp.providers").debug(
+        logging.getLogger("lm_visual_mcp.providers").debug(
             "%s stderr (rc=%s): %s", self.name, result.returncode, result.stderr[:2000]
         )
 

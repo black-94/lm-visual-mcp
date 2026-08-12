@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vision_mcp.services import WorkspaceManager
+from lm_visual_mcp.services import WorkspaceManager
 
 
 def test_temporary_workspace_created_and_cleaned() -> None:
     mgr = WorkspaceManager(base=None)
     ws = mgr.create()
-    assert ws.root.name.startswith("vision-mcp-")
+    assert ws.root.name.startswith("lm-visual-mcp-")
     assert ws.input_dir.is_dir()
     assert ws.output_dir.is_dir()
     ws.cleanup()
@@ -20,7 +20,7 @@ def test_temporary_workspace_created_and_cleaned() -> None:
 def test_base_workdir_uses_subdir(tmp_path) -> None:
     mgr = WorkspaceManager(base=tmp_path)
     ws = mgr.create()
-    assert ws.root.parent.name == ".vision-mcp"
+    assert ws.root.parent.name == ".lm-visual-mcp"
     assert ws.root.is_relative_to(tmp_path)
     ws.cleanup()
     assert not ws.root.exists()

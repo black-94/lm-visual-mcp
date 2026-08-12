@@ -1,4 +1,4 @@
-"""Allow ``python -m vision_mcp``."""
+"""Allow ``python -m lm_visual_mcp``."""
 
 from .cli import main
 

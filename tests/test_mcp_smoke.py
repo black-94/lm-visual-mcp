@@ -5,8 +5,8 @@ Uses a fake VisionSession so no real provider/network is needed.
 
 from __future__ import annotations
 
-from vision_mcp.config import AppConfig
-from vision_mcp.server import build_server
+from lm_visual_mcp.config import AppConfig
+from lm_visual_mcp.server import build_server
 
 
 class FakeSession:

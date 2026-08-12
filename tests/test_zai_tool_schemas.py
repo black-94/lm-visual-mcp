@@ -6,8 +6,8 @@ server-policy fields (provider/model/api_key/workdir/timeout/fallback).
 
 from __future__ import annotations
 
-from vision_mcp.config import AppConfig
-from vision_mcp.server import build_server
+from lm_visual_mcp.config import AppConfig
+from lm_visual_mcp.server import build_server
 
 FORBIDDEN = {"provider", "model", "api_key", "workdir", "timeout", "fallback",
              "provider_models", "credential", "token", "cookie"}

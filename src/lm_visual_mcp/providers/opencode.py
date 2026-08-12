@@ -26,10 +26,11 @@ class OpenCodeProvider(CliProvider):
         *,
         command: Optional[str] = None,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         timeout: float = 120.0,
         runner=None,
     ) -> None:
-        super().__init__(command=command, model=model, timeout=timeout, runner=runner)
+        super().__init__(command=command, model=model, effort=effort, timeout=timeout, runner=runner)
 
     async def check_vision_capability(self, request: Optional[VisionRequest]) -> str:
         if request is None or (not request.images and not request.videos):
@@ -50,6 +51,8 @@ class OpenCodeProvider(CliProvider):
             args += ["--model", self.model]
         if request.workdir is not None:
             args += ["--dir", str(request.workdir)]
+        if self.effort:
+            args += ["--variant", self.effort]
         args += ["--format", "json"]
 
         prompt = self._media_instructions(request)
@@ -118,4 +121,6 @@ class OpenCodeProvider(CliProvider):
             return ProviderFailureReason.NOT_AUTHENTICATED
         if "quota" in combined or "rate limit" in combined:
             return ProviderFailureReason.QUOTA_EXHAUSTED
+        if "permission" in combined and "denied" in combined:
+            return ProviderFailureReason.PERMISSION_DENIED
         return ProviderFailureReason.TEMPORARY_FAILURE

@@ -23,7 +23,7 @@ from .models import (
 )
 from .providers import VisionProvider, build_registry
 
-logger = logging.getLogger("vision_mcp.router")
+logger = logging.getLogger("lm_visual_mcp.router")
 
 
 @dataclass

@@ -25,11 +25,12 @@ class CodexProvider(CliProvider):
         *,
         command: Optional[str] = None,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         timeout: float = 120.0,
         runner=None,
         sandbox: str = "read-only",
     ) -> None:
-        super().__init__(command=command, model=model, timeout=timeout, runner=runner)
+        super().__init__(command=command, model=model, effort=effort, timeout=timeout, runner=runner)
         self.sandbox = sandbox
 
     async def check_vision_capability(self, request: Optional[VisionRequest]) -> str:
@@ -53,6 +54,8 @@ class CodexProvider(CliProvider):
         if request.workdir is not None:
             args += ["-C", str(request.workdir)]
         args += ["-s", self.sandbox, "--skip-git-repo-check"]
+        if self.effort:
+            args += ["-c", f"model_reasoning_effort={self.effort}"]
         if request.workdir is not None:
             schema_path = request.workdir / "schema.json"
             schema_path.write_text(_dump(build_codex_schema()), encoding="utf-8")
@@ -93,6 +96,8 @@ class CodexProvider(CliProvider):
             return ProviderFailureReason.QUOTA_EXHAUSTED
         if "invalid_json_schema" in combined or "invalid_request_error" in combined:
             return ProviderFailureReason.INVALID_MODEL
+        if "permission" in combined and "denied" in combined:
+            return ProviderFailureReason.PERMISSION_DENIED
         return ProviderFailureReason.TEMPORARY_FAILURE
 
 

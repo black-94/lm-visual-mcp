@@ -14,13 +14,13 @@ from typing import Optional
 from . import __version__
 from .config import load_config
 
-logger = logging.getLogger("vision_mcp")
+logger = logging.getLogger("lm_visual_mcp")
 
 
 def _configure_logging(level: str) -> None:
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    root = logging.getLogger("vision_mcp")
+    root = logging.getLogger("lm_visual_mcp")
     root.handlers = [handler]
     root.setLevel(level.upper())
     # Redact secrets from all logs.
@@ -43,14 +43,26 @@ def _add_redaction_filter(logger_: logging.Logger) -> None:
     logger_.addFilter(Redact())
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="vision-mcp", description="Vision MCP Server")
-    parser.add_argument("--config", default=None, help="Path to the config file")
-    parser.add_argument("--log-level", default=None, choices=["ERROR", "WARNING", "INFO", "DEBUG"],
+def _add_common_args(parser, *, suppress_default: bool) -> None:
+    """Add --config / --log-level to a parser.
+
+    ``suppress_default`` is used for subparsers so a value given on the main
+    parser (before the subcommand) is not clobbered by the subparser's default.
+    """
+    parser.add_argument("--config", default=argparse.SUPPRESS if suppress_default else None,
+                        help="Path to the config file")
+    parser.add_argument("--log-level", default=argparse.SUPPRESS if suppress_default else None,
+                        choices=["ERROR", "WARNING", "INFO", "DEBUG"],
                         help="Log level (stderr)")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="lm-visual-mcp", description="Vision MCP Server")
+    _add_common_args(parser, suppress_default=False)
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     sub = parser.add_subparsers(dest="command")
     doc = sub.add_parser("doctor", help="Inspect the environment / configuration")
+    _add_common_args(doc, suppress_default=True)
     doc.add_argument("--probe", action="store_true",
                      help="Run a real AGY vision smoke test (requires Pillow + agy)")
     return parser
@@ -86,10 +98,12 @@ def doctor(cfg, *, probe: bool = False) -> int:
             key = pc.effective_api_key()
             print(f"  API key: {'configured' if key else 'not configured'}")
             print(f"  model: {pc.model or 'default'}")
+            print(f"  effort: {pc.effort or 'default'}")
         else:
             exe = _which(pc.command)
             print(f"  executable: {exe or 'not found'}")
             print(f"  model: {pc.model or 'default'}")
+            print(f"  effort: {pc.effort or 'default'}")
         if enabled and name == "agy" and probe:
             _probe_agy(cfg, pc)
         print()
@@ -164,7 +178,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.version:
-        print(f"vision-mcp {__version__}")
+        print(f"lm-visual-mcp {__version__}")
         return 0
 
     try:

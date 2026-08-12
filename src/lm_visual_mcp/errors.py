@@ -1,4 +1,4 @@
-"""Error hierarchy for vision_mcp.
+"""Error hierarchy for lm_visual_mcp.
 
 All errors raised by the server inherit from :class:`VisionError` so the MCP
 layer can translate them into a single, safe, redacted message. Sensitive
@@ -14,7 +14,7 @@ from .models import ProviderFailureReason
 
 
 class VisionError(Exception):
-    """Base class for all vision_mcp errors."""
+    """Base class for all lm_visual_mcp errors."""
 
 
 class ConfigError(VisionError):

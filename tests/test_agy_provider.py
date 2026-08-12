@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from vision_mcp.errors import ProviderUnavailableError
-from vision_mcp.models import ImageInput, ProviderFailureReason, VisionRequest
-from vision_mcp.providers.agy import AgyProvider
-from vision_mcp.services.subprocess_runner import SubprocessResult
+from lm_visual_mcp.errors import ProviderUnavailableError
+from lm_visual_mcp.models import ImageInput, ProviderFailureReason, VisionRequest
+from lm_visual_mcp.providers.agy import AgyProvider
+from lm_visual_mcp.services.subprocess_runner import SubprocessResult
 
 
 class FakeRunner:
@@ -94,3 +94,10 @@ def test_agy_failure_rc():
     p = _agy(bad)
     with pytest.raises(ProviderUnavailableError):
         p.parse_output(bad, _req(images=False))
+
+
+def test_agy_classify_permission_denied():
+    # A non-vision rc!=0 failure that mentions permission is PERMISSION_DENIED,
+    # not UNSUPPORTED_MEDIA.
+    res = SubprocessResult("/usr/bin/agy", [], 1, "", "permission denied")
+    assert AgyProvider._classify(res) == ProviderFailureReason.PERMISSION_DENIED

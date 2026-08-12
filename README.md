@@ -38,7 +38,7 @@ Vision MCP Server
 - CLI-native images (Codex `-i`, OpenCode `--file`) and AGY workspace staging
   with vision-capability detection.
 - Gemini API via `google-genai`.
-- `vision-mcp doctor` environment inspection + `--probe` vision smoke test.
+- `lm-visual-mcp doctor` environment inspection + `--probe` vision smoke test.
 - No ACP / no transport abstraction in v1.
 
 ## Requirements
@@ -64,13 +64,13 @@ uv pip install -e ".[dev]"   # dev = pytest, pytest-asyncio, Pillow (for doctor 
 
 ```bash
 # Copy the example config and edit it to suit your machine.
-cp config.example.yaml ~/.config/vision-mcp/config.yaml
+cp config.example.yaml ~/.config/lm-visual-mcp/config.yaml
 
 # Run as an MCP stdio server
-vision-mcp --config ~/.config/vision-mcp/config.yaml
+lm-visual-mcp --config ~/.config/lm-visual-mcp/config.yaml
 
 # Or
-python -m vision_mcp --config ~/.config/vision-mcp/config.yaml
+python -m lm_visual_mcp --config ~/.config/lm-visual-mcp/config.yaml
 ```
 
 ### MCP client configuration
@@ -79,8 +79,8 @@ python -m vision_mcp --config ~/.config/vision-mcp/config.yaml
 {
   "mcpServers": {
     "vision": {
-      "command": "vision-mcp",
-      "args": ["--config", "/Users/me/.config/vision-mcp/config.yaml"],
+      "command": "lm-visual-mcp",
+      "args": ["--config", "/Users/me/.config/lm-visual-mcp/config.yaml"],
       "env": { "GEMINI_API_KEY": "..." }
     }
   }
@@ -124,6 +124,7 @@ fallback:
   on:
     - command_not_found
     - not_authenticated
+    - permission_denied
     - api_key_missing
     - quota_exhausted
     - unsupported_media
@@ -168,7 +169,7 @@ Set a model to `null` to let the provider use its own default.
 API keys are **never** tool arguments. Resolution order:
 
 ```text
-VISION_MCP_GEMINI_API_KEY
+LM_VISUAL_MCP_GEMINI_API_KEY
     > config.providers.gemini.api_key_env (the env var it names)
     > GEMINI_API_KEY
 ```
@@ -180,27 +181,31 @@ responses, and never included in exceptions. Prefer the environment variable.
 ### Environment variables
 
 ```text
-VISION_MCP_CONFIG                 config file path
-VISION_MCP_WORKDIR                runtime workdir
-VISION_MCP_TIMEOUT                runtime timeout (s)
-VISION_MCP_MAX_CONCURRENCY        max concurrency
-VISION_MCP_AGY_COMMAND            agy executable
-VISION_MCP_AGY_MODEL              agy model
-VISION_MCP_CODEX_COMMAND          codex executable
-VISION_MCP_CODEX_MODEL            codex model
-VISION_MCP_GEMINI_MODEL           gemini model
-VISION_MCP_GEMINI_API_KEY         gemini API key
-GEMINI_API_KEY                    gemini API key (fallback)
-VISION_MCP_OPENCODE_COMMAND       opencode executable
-VISION_MCP_OPENCODE_MODEL         opencode model
-VISION_MCP_LOG_LEVEL              ERROR | WARNING | INFO | DEBUG
+LM_VISUAL_MCP_CONFIG                 config file path
+LM_VISUAL_MCP_WORKDIR                runtime workdir
+LM_VISUAL_MCP_TIMEOUT                runtime timeout (s)
+LM_VISUAL_MCP_MAX_CONCURRENCY        max concurrency
+LM_VISUAL_MCP_AGY_COMMAND            agy executable
+LM_VISUAL_MCP_AGY_MODEL              agy model
+LM_VISUAL_MCP_AGY_EFFORT             agy reasoning effort
+LM_VISUAL_MCP_CODEX_COMMAND          codex executable
+LM_VISUAL_MCP_CODEX_MODEL            codex model
+LM_VISUAL_MCP_CODEX_EFFORT           codex reasoning effort
+LM_VISUAL_MCP_GEMINI_MODEL           gemini model
+LM_VISUAL_MCP_GEMINI_API_KEY         gemini API key
+LM_VISUAL_MCP_GEMINI_EFFORT          gemini reasoning effort
+GEMINI_API_KEY                       gemini API key (fallback)
+LM_VISUAL_MCP_OPENCODE_COMMAND       opencode executable
+LM_VISUAL_MCP_OPENCODE_MODEL         opencode model
+LM_VISUAL_MCP_OPENCODE_EFFORT        opencode reasoning effort
+LM_VISUAL_MCP_LOG_LEVEL              ERROR | WARNING | INFO | DEBUG
 ```
 
 ### Workdir
 
 With `runtime.workdir: null` (default), every task gets a brand-new temporary
 directory that is cleaned up on completion. With a project workdir configured,
-task media is staged under `<workdir>/.vision-mcp/<uuid>/` and removed after.
+task media is staged under `<workdir>/.lm-visual-mcp/<uuid>/` and removed after.
 User files are never modified or deleted.
 
 ### Media limits
@@ -257,9 +262,9 @@ warning.
 ## Doctor
 
 ```bash
-vision-mcp doctor
-vision-mcp doctor --probe   # also runs a real AGY vision smoke test (needs Pillow)
-vision-mcp --version
+lm-visual-mcp doctor
+lm-visual-mcp doctor --probe   # also runs a real AGY vision smoke test (needs Pillow)
+lm-visual-mcp --version
 ```
 
 `doctor` never prints API key contents.
@@ -282,7 +287,7 @@ vision-mcp --version
 > However, as of AGY CLI 1.1.x, headless mode is non-deterministic — a run may
 > intermittently need a `read_file`/`command` tool permission that headless mode
 > auto-denies. When that happens the server detects it and transparently falls
-> back to the next provider. `vision-mcp doctor --probe` reports the capability
+> back to the next provider. `lm-visual-mcp doctor --probe` reports the capability
 > without failing the server.
 
 ## Security
@@ -307,7 +312,7 @@ genai mocked), Z.AI tool-schema compatibility, and an MCP `tools/list` +
 - **`agy` falls back to codex for images** — AGY reads workspace images via
   `--add-dir`, but headless mode is non-deterministic and may intermittently
   auto-deny a tool permission. That is expected; the server falls back
-  transparently. Run `vision-mcp doctor --probe` to exercise AGY directly.
+  transparently. Run `lm-visual-mcp doctor --probe` to exercise AGY directly.
 - **Nothing responds** — no provider is `enabled`. Enable providers in config.
 - **Gemini not used** — an API key is required; see "Gemini API key".
 - **Codex blocks on stdin** — the server always closes stdin for CLI providers.

@@ -28,7 +28,7 @@ IMAGE_MIMES = {
 }
 VIDEO_MIMES = {"video/mp4", "video/quicktime", "video/x-m4v"}
 
-_HTTP_HEADERS = {"User-Agent": "vision-mcp/0.1"}
+_HTTP_HEADERS = {"User-Agent": "lm-visual-mcp/0.1"}
 
 
 @dataclass
@@ -165,4 +165,4 @@ def _suffix_from_url(url: str) -> str:
 def tempfile_mkdtemp() -> str:
     import tempfile
 
-    return tempfile.mkdtemp(prefix="vision-mcp-dl-")
+    return tempfile.mkdtemp(prefix="lm-visual-mcp-dl-")

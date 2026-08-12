@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from vision_mcp.config import AppConfig
-from vision_mcp.errors import AllProvidersFailedError, ProviderUnavailableError
-from vision_mcp.models import (
+from lm_visual_mcp.config import AppConfig
+from lm_visual_mcp.errors import AllProvidersFailedError, ProviderUnavailableError
+from lm_visual_mcp.models import (
     ProviderFailureReason,
     ProviderResult,
     ProviderStatus,
     ProviderUsage,
     VisionRequest,
 )
-from vision_mcp.router import ProviderRouter
+from lm_visual_mcp.router import ProviderRouter
 
 
 class FakeProvider:

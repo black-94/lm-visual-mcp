@@ -25,19 +25,20 @@ CONFIG_VERSION = 1
 
 # Default config file search paths (first existing wins).
 DEFAULT_CONFIG_CANDIDATES = (
-    Path("vision-mcp.yaml"),
-    Path("~/.config/vision-mcp/config.yaml").expanduser(),
-    Path("~/.config/vision-mcp/vision-mcp.yaml").expanduser(),
+    Path("lm-visual-mcp.yaml"),
+    Path("~/.config/lm-visual-mcp/config.yaml").expanduser(),
+    Path("~/.config/lm-visual-mcp/lm-visual-mcp.yaml").expanduser(),
 )
 
 # Env var prefix for all overrides.
-PREFIX = "VISION_MCP_"
+PREFIX = "LM_VISUAL_MCP_"
 
 
 class ProviderConfig(pd.BaseModel):
-    enabled: bool = False
+    enabled: bool = True
     command: Optional[str] = None
     model: Optional[str] = None
+    effort: Optional[str] = None  # Reasoning effort: low | medium | high | xhigh (provider-dependent)
     # Only meaningful for API-based providers (gemini).
     api_key_env: Optional[str] = None
     # Plain-text compatibility key. Redacted. Prefer api_key_env.
@@ -51,8 +52,11 @@ class ProviderConfig(pd.BaseModel):
         if self.api_key is not None:
             return self.api_key.get_secret_value()
         if self.api_key_env:
-            return os.environ.get(self.api_key_env)
-        return None
+            val = os.environ.get(self.api_key_env)
+            if val:
+                return val
+        # Final fallback: bare GEMINI_API_KEY.
+        return os.environ.get("GEMINI_API_KEY")
 
 
 class ProvidersConfig(pd.BaseModel):
@@ -201,17 +205,22 @@ class ConfigLoader:
         for name in ("agy", "codex", "opencode"):
             cmd = e(f"{name.upper()}_COMMAND")
             model = e(f"{name.upper()}_MODEL")
+            effort = e(f"{name.upper()}_EFFORT")
             provider = data.setdefault("providers", {}).setdefault(name, {})
             if cmd:
                 provider["command"] = cmd
             if model:
                 provider["model"] = model
+            if effort:
+                provider["effort"] = effort
 
         gem = data.setdefault("providers", {}).setdefault("gemini", {})
         if e("GEMINI_MODEL"):
             gem["model"] = e("GEMINI_MODEL")
         if e("GEMINI_API_KEY"):
             gem["api_key"] = e("GEMINI_API_KEY")
+        if e("GEMINI_EFFORT"):
+            gem["effort"] = e("GEMINI_EFFORT")
 
         if e("LOG_LEVEL"):
             data.setdefault("logging", {})["level"] = e("LOG_LEVEL")

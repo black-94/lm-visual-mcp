@@ -148,7 +148,7 @@ Subprocess：
 推荐：
 
 ```text
-vision-mcp/
+lm-visual-mcp/
 ├── pyproject.toml
 ├── README.md
 ├── LICENSE
@@ -156,7 +156,7 @@ vision-mcp/
 ├── config.example.yaml
 │
 ├── src/
-│   └── vision_mcp/
+│   └── lm_visual_mcp/
 │       ├── __init__.py
 │       ├── __main__.py
 │       │
@@ -226,7 +226,7 @@ vision-mcp/
 必须实现独立配置文件，例如：
 
 ```text
-vision-mcp.yaml
+lm-visual-mcp.yaml
 ```
 
 推荐完整结构：
@@ -272,7 +272,7 @@ fallback:
   on:
     - command_not_found
     - not_authenticated
-    - permission denied
+    - permission_denied
     - api_key_missing
     - quota_exhausted
     - unsupported_media
@@ -308,10 +308,10 @@ Built-in default
 CLI 第一版只需要：
 
 ```text
-vision-mcp --config <path>
-vision-mcp --log-level DEBUG
-vision-mcp doctor
-vision-mcp --version
+lm-visual-mcp --config <path>
+lm-visual-mcp --log-level DEBUG
+lm-visual-mcp doctor
+lm-visual-mcp --version
 ```
 
 不要为所有 Provider 参数都增加 CLI flag。
@@ -323,27 +323,31 @@ vision-mcp --version
 至少支持：
 
 ```text
-VISION_MCP_CONFIG
+LM_VISUAL_MCP_CONFIG
 
-VISION_MCP_WORKDIR
-VISION_MCP_TIMEOUT
-VISION_MCP_MAX_CONCURRENCY
+LM_VISUAL_MCP_WORKDIR
+LM_VISUAL_MCP_TIMEOUT
+LM_VISUAL_MCP_MAX_CONCURRENCY
 
-VISION_MCP_AGY_COMMAND
-VISION_MCP_AGY_MODEL
+LM_VISUAL_MCP_AGY_COMMAND
+LM_VISUAL_MCP_AGY_MODEL
+LM_VISUAL_MCP_AGY_EFFORT
 
-VISION_MCP_CODEX_COMMAND
-VISION_MCP_CODEX_MODEL
+LM_VISUAL_MCP_CODEX_COMMAND
+LM_VISUAL_MCP_CODEX_MODEL
+LM_VISUAL_MCP_CODEX_EFFORT
 
-VISION_MCP_GEMINI_MODEL
-VISION_MCP_GEMINI_API_KEY
+LM_VISUAL_MCP_GEMINI_MODEL
+LM_VISUAL_MCP_GEMINI_API_KEY
+LM_VISUAL_MCP_GEMINI_EFFORT
 
 GEMINI_API_KEY
 
-VISION_MCP_OPENCODE_COMMAND
-VISION_MCP_OPENCODE_MODEL
+LM_VISUAL_MCP_OPENCODE_COMMAND
+LM_VISUAL_MCP_OPENCODE_MODEL
+LM_VISUAL_MCP_OPENCODE_EFFORT
 
-VISION_MCP_LOG_LEVEL
+LM_VISUAL_MCP_LOG_LEVEL
 ```
 
 ---
@@ -355,7 +359,7 @@ API Key 绝对不能作为普通 MCP Tool 参数。
 Gemini Key 获取顺序：
 
 ```text
-VISION_MCP_GEMINI_API_KEY
+LM_VISUAL_MCP_GEMINI_API_KEY
     >
 config.providers.gemini.api_key_env 指向的环境变量
     >
@@ -483,6 +487,7 @@ class ProviderFailureReason(StrEnum):
     UNSUPPORTED_MEDIA = "unsupported_media"
     TIMEOUT = "timeout"
     TEMPORARY_FAILURE = "temporary_failure"
+    PERMISSION_DENIED = "permission_denied"
 
     INVALID_INPUT = "invalid_input"
     INVALID_MODEL = "invalid_model"
@@ -499,6 +504,7 @@ QUOTA_EXHAUSTED
 UNSUPPORTED_MEDIA
 TIMEOUT
 TEMPORARY_FAILURE
+PERMISSION_DENIED
 ```
 
 默认禁止 fallback：
@@ -639,7 +645,7 @@ runtime:
 例如：
 
 ```text
-/tmp/vision-mcp-f320a1/
+/tmp/lm-visual-mcp-f320a1/
 ├── input/
 │   ├── image-0.png
 │   └── image-1.png
@@ -661,7 +667,7 @@ runtime:
 MCP 自己生成的媒体临时目录应放：
 
 ```text
-<workdir>/.vision-mcp/<uuid>/
+<workdir>/.lm-visual-mcp/<uuid>/
 ```
 
 并在任务结束清理。
@@ -1424,13 +1430,13 @@ usage
 必须支持：
 
 ```bash
-python -m vision_mcp
+python -m lm_visual_mcp
 ```
 
 以及 console script：
 
 ```bash
-vision-mcp
+lm-visual-mcp
 ```
 
 默认 stdio。
@@ -1441,10 +1447,10 @@ vision-mcp
 {
   "mcpServers": {
     "vision": {
-      "command": "vision-mcp",
+      "command": "lm-visual-mcp",
       "args": [
         "--config",
-        "/Users/me/.config/vision-mcp/config.yaml"
+        "/Users/me/.config/lm-visual-mcp/config.yaml"
       ],
       "env": {
         "GEMINI_API_KEY": "..."
@@ -1504,7 +1510,7 @@ Prompt DEBUG logging：
 实现：
 
 ```bash
-vision-mcp doctor
+lm-visual-mcp doctor
 ```
 
 示例：
@@ -1513,7 +1519,7 @@ vision-mcp doctor
 Vision MCP
 
 Configuration:
-  /Users/me/.config/vision-mcp/config.yaml
+  /Users/me/.config/lm-visual-mcp/config.yaml
 
 Provider order:
   agy -> codex -> gemini -> opencode
@@ -1558,7 +1564,7 @@ agy
 doctor 可提供更深的：
 
 ```bash
-vision-mcp doctor --probe
+lm-visual-mcp doctor --probe
 ```
 
 生成测试图片：
@@ -1917,15 +1923,15 @@ pytest
 ```
 
 ```bash
-vision-mcp --version
+lm-visual-mcp --version
 ```
 
 ```bash
-vision-mcp doctor
+lm-visual-mcp doctor
 ```
 
 ```bash
-python -m vision_mcp
+python -m lm_visual_mcp
 ```
 
 MCP：

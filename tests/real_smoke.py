@@ -3,7 +3,7 @@
 Usage:
     python tests/real_smoke.py [config] [image] [--console]
 
-Launches the server (via `python -m vision_mcp` by default, or the `vision-mcp`
+Launches the server (via `python -m lm_visual_mcp` by default, or the `lm-visual-mcp`
 console script with `--console`) and performs tools/list + a real tools/call
 using the configured providers. Generates a test image if none is supplied.
 """
@@ -40,7 +40,7 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("config", nargs="?", default=DEFAULT_CONFIG)
     ap.add_argument("image", nargs="?", default="")
-    ap.add_argument("--console", action="store_true", help="use the vision-mcp console script")
+    ap.add_argument("--console", action="store_true", help="use the lm-visual-mcp console script")
     args = ap.parse_args()
 
     tmp: Path | None = None
@@ -54,8 +54,8 @@ async def main() -> int:
         tmp = Path(tempfile.mkdtemp()) / "vt.png"
         image = _make_image(tmp)
 
-    command = "vision-mcp" if args.console else sys.executable
-    cmd_args = [] if args.console else ["-m", "vision_mcp"]
+    command = "lm-visual-mcp" if args.console else sys.executable
+    cmd_args = [] if args.console else ["-m", "lm_visual_mcp"]
     params = StdioServerParameters(command=command, args=[*cmd_args, "--config", args.config])
 
     async with stdio_client(params) as (read, write):
