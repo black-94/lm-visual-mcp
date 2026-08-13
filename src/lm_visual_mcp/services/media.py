@@ -88,7 +88,9 @@ class MediaService:
 
     # -- download -----------------------------------------------------------
     def _download(self, url: str, *, kind: str) -> Path:
-        target_dir = self.workdir or Path(tempfile_mkdtemp())
+        if self.workdir is None:
+            raise MediaError("cannot download media without a configured workdir")
+        target_dir = self.workdir
         target_dir.mkdir(parents=True, exist_ok=True)
         suffix = _suffix_from_url(url) or f".{kind}"
         digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 import subprocess
 import sys
 import time
@@ -48,6 +49,32 @@ def probe_proxy(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def _spawn_detached(cmd: list[str]) -> bool:
+    """Launch ``cmd`` as a detached background process.
+
+    On POSIX, ``start_new_session`` detaches it into its own session so it
+    survives the spawning client's exit. On Windows, the same flag plus
+    ``CREATE_NO_WINDOW`` keeps the child console-less and in its own process
+    group (no flashing console; survives the client's console close).
+    """
+    kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "start_new_session": True,
+    }
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    try:
+        subprocess.Popen(cmd, **kwargs)
+        return True
+    except OSError as exc:  # e.g. missing interpreter
+        logger.warning("failed to start background process %s: %s", cmd, exc)
+        return False
+
+
 def start_proxy(
     cfg: AppConfig,
     config_path: Optional[str],
@@ -64,16 +91,7 @@ def start_proxy(
     cmd = [sys.executable, "-m", "lm_visual_mcp", "proxy"]
     if config_path:
         cmd += ["--config", config_path]
-    try:
-        subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,  # survive the spawning client's exit
-        )
-    except OSError as exc:
-        logger.warning("failed to start vision proxy: %s", exc)
+    if not _spawn_detached(cmd):
         return False
 
     deadline = time.monotonic() + max_wait
@@ -101,16 +119,7 @@ def start_primary(
     cmd = [sys.executable, "-m", "lm_visual_mcp", "daemon"]
     if config_path:
         cmd += ["--config", config_path]
-    try:
-        subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,  # survive the spawning client's exit
-        )
-    except OSError as exc:
-        logger.warning("failed to start daemon: %s", exc)
+    if not _spawn_detached(cmd):
         return False
 
     deadline = time.monotonic() + max_wait
@@ -178,14 +187,17 @@ class ProxyVisionSession:
     # -- core ----------------------------------------------------------------
     async def _call(self, **payload: object) -> dict:
         try:
-            return await asyncio.to_thread(self._post, payload)
+            result = await asyncio.to_thread(self._post, payload)
         except (urllib.error.URLError, ConnectionError, OSError):
             if self._started_once:
                 raise
             self._started_once = True
             logger.info("daemon unresponsive; restarting on %s:%s", self.host, self.port)
             start_primary(self.cfg, self.config_path, self.host, self.port)
-            return await asyncio.to_thread(self._post, payload)
+            result = await asyncio.to_thread(self._post, payload)
+        # Daemon is alive; allow a future restart if it crashes again later.
+        self._started_once = False
+        return result
 
     def _post(self, payload: dict) -> dict:
         req = urllib.request.Request(

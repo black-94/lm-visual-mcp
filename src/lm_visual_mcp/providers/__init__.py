@@ -37,9 +37,11 @@ def build_provider(name: str, provider_cfg: ProviderConfig, cfg: AppConfig, runn
             timeout=timeout, runner=runner,
         )
     if name == "gemini":
+        import os
+        api_key = provider_cfg.effective_api_key() or os.environ.get("GEMINI_API_KEY")
         return GeminiProvider(
             model=provider_cfg.model, effort=effort,
-            api_key=provider_cfg.effective_api_key(), timeout=timeout,
+            api_key=api_key, timeout=timeout,
         )
     if name == "opencode":
         return OpenCodeProvider(

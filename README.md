@@ -87,18 +87,21 @@ Point the agent's `base_url` at the proxy and nothing else. The proxy forwards
 to the real API URL that is decoded from the path.
 
 ```text
-http://127.0.0.1:8787/proxy/<protocol-path>/<base64url(complete API URL)>
+http://127.0.0.1:8787/proxy/<protocol-path>/<base64url(base API URL)>[<SDK suffix>]
 ```
 
 - `<protocol-path>`: `openai/chat`, `openai/responses`, `anthropic` — **explicit**,
   never inferred from the URL or the request body.
-- `<base64url>`: base64url of the **complete API URL** (including its path, e.g.
-  `https://api.openai.com/v1`).
+- `<base64url>`: base64url of the **base API URL** (the host, optionally with a
+  path prefix, e.g. `https://api.openai.com` or `https://.../api/plan`).
 - No querystring — only base64url.
-- **SDK-suffix tolerance**: the Anthropic SDK appends `/v1/messages` to `base_url`;
-  the proxy matches the protocol path as a prefix, then scans the remaining
-  segments for the first one that decodes to a full http(s) URL and ignores the
-  appended suffix.
+- **SDK-suffix rebasing**: the Anthropic SDK appends the endpoint path (e.g.
+  `/v1/messages`) to `base_url`. The proxy matches the protocol path as a prefix,
+  scans the remaining segments for the first one that decodes to a full http(s)
+  URL (the base), and **appends the later segments back onto it** before
+  forwarding — the final upstream path is base + SDK suffix (e.g.
+  `https://.../api/plan/v1/messages`). A raw curl with no suffix forwards the
+  base URL as-is.
 
 ```text
 http://127.0.0.1:8787/proxy/openai/chat/<b64-encoded-full-api-url>
@@ -541,7 +544,7 @@ MCP `tools/list` + `tools/call` smoke test.
 - **Codex blocks on stdin** — the server always closes stdin for CLI providers.
 - **stdout corruption** — all logs go to stderr; stdout is reserved for MCP.
 - **Proxy not forwarding** — confirm the base_url uses
-  `/proxy/<protocol-path>/<base64url(full API URL)>` and the singletons are up
+  `/proxy/<protocol-path>/<base64url(base API URL)>` and the singletons are up
   (`lm-visual-mcp start` / `lm-visual-mcp doctor`).
 
 ---

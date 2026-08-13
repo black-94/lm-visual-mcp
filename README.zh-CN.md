@@ -107,16 +107,19 @@
 把 agent 的 `base_url` 指向代理，仅此而已。代理把请求转发到从路径中解码出的真实 API URL。
 
 ```text
-http://127.0.0.1:8787/proxy/<协议路径>/<base64url(完整 API URL)>
+http://127.0.0.1:8787/proxy/<协议路径>/<base64url(基础 API URL)>[<SDK 追加后缀>]
 ```
 
 - `<协议路径>`：`openai/chat`、`openai/responses`、`anthropic` —— **显式声明**，
   绝不从 URL 或请求体推断。
-- `<base64url>`：对**完整 API URL**（含路径，如 `https://api.openai.com/v1`）做
-  base64url 编码。
+- `<base64url>`：对**基础 API URL**（域名，可含路径前缀，如
+  `https://api.openai.com` 或 `https://.../api/plan`）做 base64url 编码。
 - 无 querystring，只用 base64url。
-- **SDK 后缀宽容**：Anthropic SDK 会在 base_url 后追加 `/v1/messages`，代理会扫描
-  剩余路径段、忽略后缀，只认第一个能解码成完整 http(s) URL 的段。
+- **SDK 后缀拼接**：SDK（如 Anthropic SDK 用的 Claude Code）会在 base_url 后追加
+  endpoint 路径（如 `/v1/messages`）。代理扫描剩余路径段，认第一个能解码成完整
+  http(s) URL 的段作为基础 URL，并把其后段**拼回到解码出的 URL 上**再转发——
+  最终请求路径 = 基础 URL + SDK 追加后缀。这样网关收到的才是完整路径
+  （如 `https://.../api/plan/v1/messages`）。raw curl 不带后缀时，就只转发基础 URL。
 
 ```text
 http://127.0.0.1:8787/proxy/openai/chat/<b64-encoded-full-api-url>
@@ -528,7 +531,7 @@ python -m pytest
 - **Gemini 未使用** — 需要 API Key；见 “Gemini API key”。
 - **Codex 阻塞等待 stdin** — 服务器始终为 CLI 提供商关闭 stdin。
 - **stdout 损坏** — 所有日志走 stderr；stdout 专用于 MCP。
-- **代理不转发** — 确认 base_url 指向 `/proxy/<协议路径>/<base64url(完整 API URL)>`，
+- **代理不转发** — 确认 base_url 指向 `/proxy/<协议路径>/<base64url(基础 API URL)>`，
   且 daemon 与 proxy 单例已启动（`lm-visual-mcp start` / `lm-visual-mcp doctor`）。
 
 ---

@@ -135,26 +135,37 @@ def test_api_secret_redacted(tmp_path) -> None:
 
 
 def test_gemini_api_key_three_level_resolution(tmp_path, monkeypatch) -> None:
-    """Plan §8: LM_VISUAL_MCP_GEMINI_API_KEY > api_key_env > GEMINI_API_KEY."""
+    """Plan §8: LM_VISUAL_MCP_GEMINI_API_KEY > api_key_env > None."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
         "providers:\n  gemini:\n    enabled: true\n    api_key_env: CUSTOM_KEY\n",
         encoding="utf-8",
     )
 
-    # Level 3: bare GEMINI_API_KEY fallback when nothing else is set.
+    # No matching env vars → None (no hardcoded GEMINI_API_KEY fallback).
     monkeypatch.setenv("GEMINI_API_KEY", "lvl3")
     monkeypatch.delenv("CUSTOM_KEY", raising=False)
     monkeypatch.delenv("LM_VISUAL_MCP_GEMINI_API_KEY", raising=False)
-    assert load_config(config_path=str(cfg_file), env=None).providers.gemini.effective_api_key() == "lvl3"
+    assert load_config(config_path=str(cfg_file), env=None).providers.gemini.effective_api_key() is None
 
-    # Level 2: api_key_env wins over GEMINI_API_KEY.
+    # Level 2: api_key_env (CUSTOM_KEY) takes effect.
     monkeypatch.setenv("CUSTOM_KEY", "lvl2")
     assert load_config(config_path=str(cfg_file), env=None).providers.gemini.effective_api_key() == "lvl2"
 
     # Level 1: the prefixed env override wins over everything.
     monkeypatch.setenv("LM_VISUAL_MCP_GEMINI_API_KEY", "lvl1")
     assert load_config(config_path=str(cfg_file), env=None).providers.gemini.effective_api_key() == "lvl1"
+
+
+def test_gemini_default_api_key_env(tmp_path, monkeypatch) -> None:
+    """Default gemini config (no YAML override) has api_key_env=GEMINI_API_KEY."""
+    # When gemini section is not in the YAML at all, default_factory kicks in
+    # and sets api_key_env="GEMINI_API_KEY".
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text("version: 1\n", encoding="utf-8")
+    monkeypatch.setenv("GEMINI_API_KEY", "default_key")
+    monkeypatch.delenv("LM_VISUAL_MCP_GEMINI_API_KEY", raising=False)
+    assert load_config(config_path=str(cfg_file), env=None).providers.gemini.effective_api_key() == "default_key"
 
 
 def test_effort_env_override(monkeypatch, tmp_path) -> None:

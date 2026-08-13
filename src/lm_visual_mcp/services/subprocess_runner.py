@@ -71,7 +71,13 @@ class SubprocessRunner:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            stdout_bytes, stderr_bytes = b"", b""
+            # Try to read any buffered output before the kill.
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=2.0
+                )
+            except Exception:  # noqa: BLE001
+                stdout_bytes, stderr_bytes = b"", b""
             timed_out = True
 
         return SubprocessResult(

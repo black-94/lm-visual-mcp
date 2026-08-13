@@ -47,7 +47,7 @@ class ProviderConfig(pd.BaseModel):
     def effective_api_key(self) -> Optional[str]:
         """Resolve the API key, never leaking it.
 
-        Order: explicit config key > api_key_env > (gemini) GEMINI_API_KEY.
+        Order: explicit config key > api_key_env env-var.
         """
         if self.api_key is not None:
             return self.api_key.get_secret_value()
@@ -55,8 +55,7 @@ class ProviderConfig(pd.BaseModel):
             val = os.environ.get(self.api_key_env)
             if val:
                 return val
-        # Final fallback: bare GEMINI_API_KEY.
-        return os.environ.get("GEMINI_API_KEY")
+        return None
 
 
 class ProvidersConfig(pd.BaseModel):
@@ -70,7 +69,7 @@ class ProvidersConfig(pd.BaseModel):
         return getattr(self, name, None)
 
     def names(self) -> list[str]:
-        return list(self.model_dump().keys())
+        return [k for k in self.model_dump().keys() if k != "order"]
 
 
 class RuntimeConfig(pd.BaseModel):
@@ -226,6 +225,8 @@ class ConfigLoader:
             cmd = e(f"{name.upper()}_COMMAND")
             model = e(f"{name.upper()}_MODEL")
             effort = e(f"{name.upper()}_EFFORT")
+            if not (cmd or model or effort):
+                continue
             provider = data.setdefault("providers", {}).setdefault(name, {})
             if cmd:
                 provider["command"] = cmd
@@ -234,13 +235,20 @@ class ConfigLoader:
             if effort:
                 provider["effort"] = effort
 
-        gem = data.setdefault("providers", {}).setdefault("gemini", {})
-        if e("GEMINI_MODEL"):
-            gem["model"] = e("GEMINI_MODEL")
-        if e("GEMINI_API_KEY"):
-            gem["api_key"] = e("GEMINI_API_KEY")
-        if e("GEMINI_EFFORT"):
-            gem["effort"] = e("GEMINI_EFFORT")
+        # Only materialize the gemini section when an actual override exists;
+        # otherwise pydantic's default_factory (api_key_env="GEMINI_API_KEY")
+        # would be skipped, dropping the default key resolution.
+        gem = {
+            k: v
+            for k, v in (
+                ("model", e("GEMINI_MODEL")),
+                ("api_key", e("GEMINI_API_KEY")),
+                ("effort", e("GEMINI_EFFORT")),
+            )
+            if v
+        }
+        if gem:
+            data.setdefault("providers", {}).setdefault("gemini", {}).update(gem)
 
         if e("LOG_LEVEL"):
             data.setdefault("logging", {})["level"] = e("LOG_LEVEL")

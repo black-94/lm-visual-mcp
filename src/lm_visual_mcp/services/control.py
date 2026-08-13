@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import sys
 import threading
 import time
@@ -71,12 +72,19 @@ def unlink_pidfile(pidfile: Path) -> None:
 
 
 def daemonize(pidfile: Path) -> None:
-    """Detach into a background daemon (double fork + setsid).
+    """Detach into a background daemon.
 
-    Runs only in the fully-forked grandchild; the intermediate parents exit.
-    The bound socket FD (if any) survives fork. Logs after this point go no-
-    where (stdio is redirected to /dev/null).
+    Runs only in the process that will serve. On POSIX this is the fully-forked
+    grandchild (double fork + setsid) so the intermediate parents exit and the
+    bound socket FD survives. On Windows there is no ``fork``: the client
+    already spawned this process detached (``subprocess.Popen`` with
+    ``start_new_session`` + DEVNULL stdio), so we only write the pidfile and
+    redirect logs. Logs after this point go to a file next to the pidfile.
     """
+    if platform.system() == "Windows":
+        _daemonize_windows(pidfile)
+        return
+
     if os.fork() > 0:
         os._exit(0)
     os.setsid()
@@ -103,6 +111,9 @@ def daemonize(pidfile: Path) -> None:
         pidfile.write_text(str(os.getpid()))
     except OSError:
         pass
+
+    # Redirect logging to a file so daemon errors are not silently lost.
+    _setup_daemon_logging(pidfile.parent)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -292,3 +303,36 @@ def run_daemon(cfg: AppConfig) -> int:
     daemonize(default_pidfile())
     ts.serve()
     return 0
+
+
+def _setup_daemon_logging(log_dir: Path) -> None:
+    """Set up file-based logging for the daemon process."""
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "daemon.log"
+        handler = logging.FileHandler(str(log_file), encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        root = logging.getLogger("lm_visual_mcp")
+        root.handlers = [handler]
+        root.setLevel(logging.INFO)
+    except OSError:
+        pass  # best-effort; don't crash the daemon if log setup fails
+
+
+def _daemonize_windows(pidfile: Path) -> None:
+    """Windows detach: no double-fork, the client already backgrounded us.
+
+    The detached spawn (``start_new_session`` + DEVNULL stdio) happens in
+    ``start_primary``/``start_proxy`` on the client side; here we only persist
+    the pidfile and route logs to a file. If the daemon was started directly
+    from a console, it stays attached to that console — acceptable fallback,
+    since a true background detach on Windows requires the client-spawn path.
+    """
+    try:
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(str(os.getpid()))
+    except OSError:
+        pass
+    _setup_daemon_logging(pidfile.parent)

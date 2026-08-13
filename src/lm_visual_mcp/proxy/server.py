@@ -12,6 +12,8 @@ import asyncio
 import base64
 import logging
 import os
+from pathlib import Path
+from urllib.parse import quote
 
 from aiohttp import web
 
@@ -61,11 +63,15 @@ class VisionProxyApp:
     ) -> None:
         self.cfg = cfg
         self.router = router or ProviderRouter(cfg, build_registry(cfg))
+        # Persistent workdir for proxy temp files; cleaned up on shutdown.
+        self._media_workdir = Path("~/.cache/lm-visual-mcp/proxy-media").expanduser()
+        self._media_workdir.mkdir(parents=True, exist_ok=True)
         self.media = MediaService(
             max_image_mb=cfg.media.max_image_mb,
             max_video_mb=cfg.media.max_video_mb,
             download_timeout=cfg.media.download_timeout,
             max_download_mb=cfg.media.max_download_mb,
+            workdir=self._media_workdir,
         )
         self.cache = VisionCache()
         self._adapters = adapters or build_adapter_registry()
@@ -87,6 +93,9 @@ class VisionProxyApp:
         if self._session is not None:
             await self._session.close()
             self._session = None
+        # Clean up proxy temp media files.
+        import shutil
+        shutil.rmtree(self._media_workdir, ignore_errors=True)
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         try:
@@ -98,36 +107,36 @@ class VisionProxyApp:
             return web.Response(status=500, text="proxy error")
 
     async def _handle(self, request: web.Request) -> web.StreamResponse:
-        proto, target = self._parse_target(request.path)
+        proto, target, suffix = self._parse_target(request.path)
         adapter = self._adapters.get(proto)
-
         body = await request.read()
-        if not adapter.has_image(body):
-            return await self._forward(request, target, body)
+        if adapter is None or not adapter.has_image(body):
+            return await self._forward(request, target, suffix, body)
 
         try:
             extracted = adapter.extract(body, self.media)
         except Exception as exc:  # noqa: BLE001 - fall back to transparent
             logger.warning("proxy parse failed for %s; forwarding raw: %s", proto, exc)
-            return await self._forward(request, target, body)
+            return await self._forward(request, target, suffix, body)
         if not extracted.slots:
-            return await self._forward(request, target, body)
+            return await self._forward(request, target, suffix, body)
 
         descs = await self._describe_cached(extracted.slots)
         for slot, desc in zip(extracted.slots, descs):
             slot.apply(desc)
-        return await self._forward(request, target, serialize(extracted.doc))
+        return await self._forward(request, target, suffix, serialize(extracted.doc))
 
-    def _parse_target(self, path: str) -> tuple[str, str]:
-        """Return ``(protocol_path, target_url)`` from ``/proxy/<proto>/<b64>...``.
+    def _parse_target(self, path: str) -> tuple[str, str, str]:
+        """Return ``(protocol_path, target_url, suffix_path)`` from ``/proxy/<proto>/<b64>...``.
 
-        Tolerant of a trailing suffix: SDKs (e.g. the Anthropic SDK used by
-        Claude Code) append the endpoint path onto the configured ``base_url``,
-        so the URL arrives as ``/proxy/<proto>/<b64>/v1/messages``. We match the
-        protocol path as a prefix, then scan the remaining segments for the one
-        that base64url-decodes to a full http(s) URL; any later segments are the
-        appended suffix and ignored (the decoded target already carries its own
-        path).
+        The base64 segment encodes the *base* upstream URL. SDKs (e.g. the
+        Anthropic SDK used by Claude Code) append the endpoint path onto the
+        configured ``base_url``, so the request arrives with a trailing suffix
+        (e.g. ``/v1/messages``). We match the protocol path as a prefix, scan
+        the remaining segments for the one that base64url-decodes to a full
+        http(s) URL, and return the later segments as ``suffix_path`` so the
+        forwarder can rebase them onto the decoded target — the upstream
+        gateway expects the full path (base + endpoint).
         """
         parts = path.strip("/").split("/")
         if len(parts) < 3 or parts[0] != "proxy":
@@ -143,14 +152,20 @@ class VisionProxyApp:
                 break
         if proto is None:
             raise ProxyError(404, "unknown protocol path")
-        for seg in parts[consumed:]:
+        target = None
+        for i in range(consumed, len(parts)):
             try:
-                target = base64.urlsafe_b64decode(_pad(seg)).decode("utf-8")
+                decoded = base64.urlsafe_b64decode(_pad(parts[i])).decode("utf-8")
             except Exception:  # noqa: BLE001 - not this segment
                 continue
-            if target.startswith(("http://", "https://")):
-                return proto, target
-        raise ProxyError(400, "missing base64url ref")
+            if decoded.startswith(("http://", "https://")):
+                target = decoded
+                consumed = i + 1
+                break
+        if target is None:
+            raise ProxyError(400, "missing base64url ref")
+        suffix = "/" + "/".join(quote(s, safe="") for s in parts[consumed:]) if parts[consumed:] else ""
+        return proto, target, suffix
 
     # -- describe (per-image cache, batched vision call) --------------------
     async def _describe_cached(self, slots: list[ImageSlot]) -> list[str]:
@@ -159,7 +174,7 @@ class VisionProxyApp:
         missed: list[int] = []
         for i, slot in enumerate(slots):
             key = self.cache.key_of_file(slot.image.local_path)
-            hit = self.cache.get(key)
+            hit = await self.cache.aget(key)
             if hit is not None:
                 descs[i] = hit
             else:
@@ -171,7 +186,7 @@ class VisionProxyApp:
             for k, i in enumerate(missed):
                 txt = results[k] if k < len(results) else ""
                 descs[i] = txt
-                self.cache.put(self.cache.key_of_file(slots[i].image.local_path), txt)
+                await self.cache.aput(self.cache.key_of_file(slots[i].image.local_path), txt)
         return descs
 
     # -- forwarding ---------------------------------------------------------
@@ -182,12 +197,13 @@ class VisionProxyApp:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    async def _forward(self, request: web.Request, target: str, body: bytes) -> web.StreamResponse:
+    async def _forward(self, request: web.Request, target: str, suffix: str, body: bytes) -> web.StreamResponse:
         session = await self._get_session()
+        url = target if not suffix else target.rstrip("/") + suffix
         out_headers = _passthrough_headers(request.headers)
-        out_headers["Host"] = _host_of(target)
+        out_headers["Host"] = _host_of(url)
         out_headers["Content-Length"] = str(len(body))
-        async with session.request(request.method, target, headers=out_headers, data=body) as resp:
+        async with session.request(request.method, url, headers=out_headers, data=body) as resp:
             resp_headers = _passthrough_headers(resp.headers)
             resp_headers.pop("Content-Length", None)  # streamed; aiohttp frames it
             stream = web.StreamResponse(status=resp.status, headers=resp_headers)

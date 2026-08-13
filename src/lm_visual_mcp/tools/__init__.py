@@ -30,17 +30,21 @@ class VisionSession:
         self.workspaces = WorkspaceManager(
             base=Path(cfg.runtime.workdir) if cfg.runtime.workdir else None
         )
-        self.media = MediaService(
-            max_image_mb=cfg.media.max_image_mb,
-            max_video_mb=cfg.media.max_video_mb,
-            download_timeout=cfg.media.download_timeout,
-            max_download_mb=cfg.media.max_download_mb,
-        )
         self.router = router or ProviderRouter(cfg)
         # Serializes request execution across every caller (all MCP sessions in
         # the shared daemon funnel through this one session). Requests beyond
         # runtime.max_concurrency queue here; set it to 1 for strict serial.
         self._sem = asyncio.Semaphore(cfg.runtime.max_concurrency)
+
+    def _make_media_service(self, workdir: Optional[Path] = None) -> MediaService:
+        """Create a per-request MediaService to avoid shared-state races."""
+        return MediaService(
+            max_image_mb=self.cfg.media.max_image_mb,
+            max_video_mb=self.cfg.media.max_video_mb,
+            download_timeout=self.cfg.media.download_timeout,
+            max_download_mb=self.cfg.media.max_download_mb,
+            workdir=workdir,
+        )
 
     # -- image tool ---------------------------------------------------------
     async def analyze_images(
@@ -50,7 +54,6 @@ class VisionSession:
         image_sources: list[str],
         user_prompt: str,
         output_type: Optional[str] = None,
-        output_schema: Optional[dict] = None,
     ) -> dict:
         system_prompt = get_system_prompt(tool, output_type)
         return await self._run(
@@ -129,18 +132,19 @@ class VisionSession:
         image_sources: list[str],
         video_sources: list[str],
     ) -> VisionRequest:
-        # Remote downloads land inside the workspace so they are cleaned up.
-        self.media.workdir = workspace.root
+        # Per-request MediaService avoids shared mutable state across concurrent
+        # requests (each gets its own workdir for remote downloads).
+        media = self._make_media_service(workdir=workspace.root)
         images: list[ImageInput] = []
         for source in image_sources:
-            resolved = self.media.resolve_image(source)
+            resolved = media.resolve_image(source)
             staged = workspace.stage_media(resolved.local_path)
             images.append(
                 ImageInput(source=source, local_path=str(staged), mime_type=resolved.mime_type)
             )
         videos: list[VideoInput] = []
         for source in video_sources:
-            resolved = self.media.resolve_video(source)
+            resolved = media.resolve_video(source)
             staged = workspace.stage_media(resolved.local_path)
             videos.append(
                 VideoInput(source=source, local_path=str(staged), mime_type=resolved.mime_type)

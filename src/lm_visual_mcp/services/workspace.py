@@ -40,7 +40,7 @@ class Workspace:
     def stage_media(self, source: str) -> Path:
         """Copy/link a media source into the input dir under a safe name."""
         src = Path(source)
-        target = self.input_dir / f"media-{len(list(self.input_dir.iterdir()))}{src.suffix}"
+        target = self.input_dir / f"media-{uuid.uuid4().hex[:12]}{src.suffix}"
         if not src.exists():
             raise FileNotFoundError(f"media source not found: {source}")
         shutil.copy2(src, target)

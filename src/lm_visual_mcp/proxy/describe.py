@@ -46,7 +46,7 @@ async def describe(router: ProviderRouter, images: list[ImageInput], timeout: fl
     if not isinstance(arr, list):
         arr = [routed.result.get("answer") or routed.result.get("summary") or ""]
     # Align to the number of images, never guessing content.
-    return [_coerce(arr[k]) for k in range(len(images))]
+    return [_coerce(arr[k]) if k < len(arr) else "" for k in range(len(images))]
 
 
 def _coerce(value) -> str:

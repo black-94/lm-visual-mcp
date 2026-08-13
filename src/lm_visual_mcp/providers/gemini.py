@@ -174,11 +174,8 @@ class GeminiProvider(VisionProvider):
 
 
 def _safe_getattr(obj, name, default=None):
-    for node in [obj]:
-        val = getattr(node, name, None)
-        if val is not None:
-            return val
-    return default
+    val = getattr(obj, name, None)
+    return val if val is not None else default
 
 
 def _num(value):

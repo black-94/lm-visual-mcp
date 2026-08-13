@@ -141,7 +141,8 @@ def doctor(cfg, *, probe: bool = False) -> int:
         print(name)
         print(f"  enabled: {'yes' if enabled else 'no'}")
         if name == "gemini":
-            key = pc.effective_api_key()
+            import os
+            key = pc.effective_api_key() or os.environ.get("GEMINI_API_KEY")
             print(f"  API key: {'configured' if key else 'not configured'}")
             print(f"  model: {pc.model or 'default'}")
             print(f"  effort: {pc.effort or 'default'}")
@@ -244,6 +245,11 @@ def _probe_agy(cfg, pc) -> None:
             ok = answer and "7391" in answer
             print(f"  vision capability: {'available' if ok else 'unavailable'}")
             print(f"  agy answer: {answer[:80]!r}")
+        except RuntimeError as exc:
+            if "cannot be called" in str(exc) or "running event loop" in str(exc):
+                print(f"  vision capability: skipped (cannot run probe inside existing event loop)")
+            else:
+                print(f"  vision capability: unsupported ({exc})")
         except Exception as exc:  # noqa: BLE001
             print(f"  vision capability: unsupported ({exc})")
 

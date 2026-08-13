@@ -12,15 +12,17 @@
 ## 1. URL 结构
 
 ```
-/proxy/<协议路径>/<base64url(完整API URL)>
+/proxy/<协议路径>/<base64url(基础API URL)>[<SDK追加后缀>]
 ```
 
 - 协议路径显式给定，决定用哪个改写适配器（不靠 URL 推断）。
-- base64url 编码**完整 endpoint**（含路径），解码后即转发目标。
+- base64url 编码**基础 API URL**（域名，可含路径前缀），SDK 追加的 endpoint 路径
+  由代理拼回去。
 
 ```text
-origin:    https://api.deepseek.com/v1/chat/completions
-base64url: aHR0cHM6Ly9hcGkuZGVlcHNlZWsuY29tL3YxL2NoYXQvY29tcGxldGlvbnM
+origin:    https://api.deepseek.com                （基础，SDK 追加 /v1/chat/completions）
+base64url: aHR0cHM6Ly9hcGkuZGVlcHNlZWsuY29t
+最终转发:  https://api.deepseek.com/v1/chat/completions
 
 base_url:  http://127.0.0.1:8787/proxy/openai/chat/aHR0cHM6...
                                   └─ 协议路径 ─┘
@@ -36,9 +38,10 @@ base_url:  http://127.0.0.1:8787/proxy/openai/chat/aHR0cHM6...
 
 **SDK 会把 endpoint 拼到 base_url 后面**：Claude Code 用 Anthropic SDK，`base_url` 配成
 `/proxy/anthropic/<b64>` 后，请求实际到达 `/proxy/anthropic/<b64>/v1/messages`。解析器
-因此**容忍尾部后缀**：协议路径按前缀匹配，然后在剩余段里找第一个能 base64url 解码成
-完整 http(s) URL 的段——它就是 ref，其后段（如 `v1/messages`）忽略（解码出的 target
-已自带路径）。raw curl 不带后缀也照常工作。
+协议路径按前缀匹配，然后在剩余段里找第一个能 base64url 解码成完整 http(s) URL 的段
+作为**基础 URL**，并把其后段（如 `v1/messages`）**拼回解码出的 URL 上**再转发——最终
+上游路径 = 基础 URL + SDK 追加后缀（如 `https://.../api/plan/v1/messages`）。raw curl
+不带后缀时，只转发基础 URL。
 
 ## 2. 核心流程
 

@@ -238,19 +238,24 @@ def test_parse_target_tolerates_sdk_suffix():
     from lm_visual_mcp.proxy.server import VisionProxyApp
 
     app = VisionProxyApp(AppConfig())
-    target = "https://api.anthropic.com/v1/messages"
-    # Claude Code / Anthropic SDK appends /v1/messages onto our base_url.
-    proto, got = app._parse_target(f"/proxy/anthropic/{_b64(target)}/v1/messages")
-    assert (proto, got) == ("anthropic", target)
-    # openai/chat protocol path + SDK-appended /v1/chat/completions
-    t2 = "https://api.deepseek.com/v1/chat/completions"
-    proto, got = app._parse_target(
-        f"/proxy/openai/chat/{_b64(t2)}/v1/chat/completions"
+    # Base URL encoded; Claude Code / Anthropic SDK appends /v1/messages —
+    # the suffix is returned so the forwarder rebases it onto the target.
+    proto, got, suffix = app._parse_target(
+        f"/proxy/anthropic/{_b64('https://api.anthropic.com')}/v1/messages"
     )
-    assert (proto, got) == ("openai/chat", t2)
-    # raw curl without a suffix still works
-    proto, got = app._parse_target(f"/proxy/anthropic/{_b64(target)}")
-    assert (proto, got) == ("anthropic", target)
+    assert (proto, got, suffix) == ("anthropic", "https://api.anthropic.com", "/v1/messages")
+    # openai/chat protocol path + SDK-appended /v1/chat/completions
+    proto, got, suffix = app._parse_target(
+        f"/proxy/openai/chat/{_b64('https://api.deepseek.com')}/v1/chat/completions"
+    )
+    assert (proto, got, suffix) == (
+        "openai/chat", "https://api.deepseek.com", "/v1/chat/completions"
+    )
+    # raw curl without a suffix still works (empty suffix)
+    proto, got, suffix = app._parse_target(
+        f"/proxy/anthropic/{_b64('https://api.anthropic.com/v1/messages')}"
+    )
+    assert (proto, got, suffix) == ("anthropic", "https://api.anthropic.com/v1/messages", "")
 
 
 def test_parse_target_rejects_bad_path():
@@ -279,7 +284,9 @@ async def test_end_to_end_with_sdk_suffix(unused_tcp_port):
     origin_server = TestServer(origin, port=unused_tcp_port)
     await origin_server.start_server()
 
-    target = f"http://127.0.0.1:{origin_server.port}/v1/messages"
+    # Base URL encoded; the SDK-appended /v1/messages suffix is rebased onto it,
+    # so the origin must receive the request at /v1/messages.
+    target = f"http://127.0.0.1:{origin_server.port}"
     fake = FakeRouter(["a debug screenshot"])
     proxy = _app(fake)
     client = TestClient(TestServer(proxy.build()))

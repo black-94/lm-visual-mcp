@@ -7,6 +7,7 @@ descriptions are short strings, so memory stays negligible.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ class VisionCache:
     def __init__(self, max_entries: int = 4096) -> None:
         self._max = max_entries
         self._map: dict[str, str] = {}
+        self._lock = asyncio.Lock()
 
     def get(self, key: str) -> Optional[str]:
         return self._map.get(key)
@@ -27,6 +29,14 @@ class VisionCache:
             # FIFO eviction (dict preserves insertion order).
             self._map.pop(next(iter(self._map)))
         self._map[key] = description
+
+    async def aget(self, key: str) -> Optional[str]:
+        async with self._lock:
+            return self._map.get(key)
+
+    async def aput(self, key: str, description: str) -> None:
+        async with self._lock:
+            self.put(key, description)
 
     @staticmethod
     def key_of_bytes(data: bytes) -> str:

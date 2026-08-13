@@ -7,6 +7,7 @@ tool schemas — they are policy owned by the server configuration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -121,4 +122,42 @@ def build_server(cfg: AppConfig, session: Optional[VisionSession] = None) -> Fas
             tool="video_analysis", video_source=video_source, user_prompt=prompt
         )
 
+    # Validate that _TOOL_NAMES stays in sync with registered tools.
+    _validate_tool_names(mcp)
+
     return mcp
+
+
+async def _registered_tool_names(mcp: FastMCP) -> set[str]:
+    """Return the tool names FastMCP actually registered (public API)."""
+    tools = await mcp.list_tools()
+    return {tool.name for tool in tools}
+
+
+def _validate_tool_names(mcp: FastMCP) -> None:
+    """Warn if ``_TOOL_NAMES`` (used by ``/health``) drifts from the real set.
+
+    ``list_tools`` is async while ``build_server`` is sync. When no event loop
+    is running (normal CLI startup) we bridge with ``asyncio.run``; if one is
+    already running (embedded use) we can't block synchronously, so the check is
+    skipped there — the async smoke test covers the same comparison.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        return  # a loop is already running; can't await from a sync function
+
+    registered = asyncio.run(_registered_tool_names(mcp))
+    declared = set(_TOOL_NAMES)
+    if registered == declared:
+        return
+    missing = registered - declared
+    extra = declared - registered
+    parts = []
+    if missing:
+        parts.append(f"missing from _TOOL_NAMES: {missing}")
+    if extra:
+        parts.append(f"in _TOOL_NAMES but not registered: {extra}")
+    logger.warning("tool_names.py out of sync: %s", "; ".join(parts))

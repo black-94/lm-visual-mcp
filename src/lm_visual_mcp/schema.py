@@ -154,7 +154,7 @@ def normalize_result(raw: dict) -> VisionResult:
         warnings.append(f"result normalization warning: {exc}")
         result = VisionResult(
             summary=str(raw.get("summary", "")),
-            answer=str(raw.get("answer", raw.get("answer") or raw.get("summary", ""))),
+            answer=str(raw.get("answer") or raw.get("summary") or ""),
             warnings=warnings,
         )
     extras = {k: v for k, v in raw.items() if k not in VisionResult.model_fields}
