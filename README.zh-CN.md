@@ -1,314 +1,242 @@
 # Vision MCP Server / 视觉 MCP 服务器
 
-> [**English**](README.md) | **简体中文**
+> [English](README.md) | **简体中文**
 
-一个**视觉 MCP 服务器**，通过
-[Model Context Protocol](https://modelcontextprotocol.io) 为纯文本 LLM / 编码 agent
-提供视觉能力，并附带一个**视觉代理（Vision Proxy）**——一个透明 HTTP 转发器，
-让纯文本模型的普通 API 客户端无需改代码即可“看见”图片。
+`lm-visual-mcp` 通过 [Model Context Protocol](https://modelcontextprotocol.io) 为纯文本 LLM
+和 Coding Agent 提供视觉输入。项目还带有一个可选的 HTTP Vision Proxy：它会先把
+OpenAI 或 Anthropic 请求中的图片描述成文本，再把改写后的请求转发给上游模型 API；同时
+兼容 Claude Code Auto classifier 经过 Anthropic-compatible gateway 的场景。
 
----
+仓库当前版本为 **v0.1.0**。图片分析是稳定主路径；视频工具名为兼容性而保留，但当前没有
+provider 具备可靠的端到端视频附件通路。详见[当前限制](#当前限制)。
 
-## 目录
+## 能力概览
 
-- [简介](#简介)
-- [为什么需要视觉 MCP？](#为什么需要视觉-mcp)
-- [架构](#架构)
-- [视觉代理](#视觉代理)
-- [特性](#特性)
-- [环境要求](#环境要求)
-- [安装](#安装)
-- [快速上手](#快速上手)
-- [生命周期命令](#生命周期命令)
-- [MCP 客户端配置](#mcp-客户端配置)
-- [配置](#配置)
-- [工具](#工具)
-- [结构化输出](#结构化输出)
-- [环境诊断](#环境诊断)
-- [提供商探测](#提供商探测)
-- [安全](#安全)
-- [开发](#开发)
-- [故障排查](#故障排查)
-- [许可](#许可)
+- 8 个任务型视觉工具和 2 个兼容别名。
+- 服务端控制 provider 路由，默认 AGY → Codex → Gemini → OpenCode。
+- 每任务隔离工作区和有界远程媒体下载。
+- 多个 MCP 客户端复用一个本地 daemon。
+- 无论使用哪个 provider，均返回统一 JSON 结构。
+- 支持 OpenAI Chat、OpenAI Responses、Anthropic Messages 的透明视觉代理。
+- 支持 Claude Code Auto classifier 的可配置 thinking 改写和第一阶段响应规范化。
+- CLI 生命周期管理和环境诊断。
 
----
-
-## 简介
-
-本项目是一个**视觉 MCP 服务器**：让只能读文本的 LLM / 编码 agent 具备“看”的能力。
-它对外暴露一组与 Z.AI 兼容的视觉工具（`analyze_image`、`extract_text_from_screenshot`、
-`ui_diff_check` 等），并把每个请求路由到一条可配置的视觉提供商链路
-（AGY → Codex → Gemini API → OpenCode），支持自动降级（fallback）。
-
-**提供商、模型、API Key、降级顺序都是服务器策略（server policy）——LLM 永远看不到、
-也不能选择它们。**
-
-除了 MCP 工具，本项目还实现了一个**透明的视觉代理（Vision Proxy）**：
-
-- 只支持 **OpenAI**（`openai/chat`、`openai/responses`）与 **Anthropic** 两种协议；
-- **无图片时**完全透明转发（透传 body，仅剥离逐跳头，API Key 与 body 原样透传）；
-- **有图片时**先做一次通用的 describe（复用现有视觉提供商），再按**每张图片的
-  SHA-256 缓存**命中，把请求里的图片部分改写为文本；
-- 响应（含 SSE 流式）始终原样回传。
-
-它的目标：让 Claude Code / 其他 agent 的**文本模型客户端**仍走原来的 base_url，
-只是把 base_url 指到代理，就能自动获得图像感知能力，而无需在客户端里改任何代码。
-
----
-
-## 为什么需要视觉 MCP？
-
-大多数编码 agent / 纯文本 LLM 无法“看见”截图、报错堆栈、UI 原型或图表。这个服务器充当它们的眼睛：
-
-```text
-纯文本 LLM
-      │  MCP
-      ▼
-视觉 MCP 服务器
-   ├── Z.AI 兼容视觉工具
-   ├── 专用提示词层
-   ├── 媒体 / 工作区层
-   ├── 结构化 JSON 层
-   └── 提供商路由（AGY → Codex → Gemini → OpenCode）
-```
-
-```
-纯文本 LLM
-      │  HTTP（base_url 指向代理）
-      ▼
-视觉代理（openai/chat · openai/responses · anthropic）
-      │  无图片 => 字节级透明转发；有图片 => describe + 改写为文本
-      ▼
-真实 OpenAI / Anthropic API
-```
-
----
+Provider、模型、凭证、fallback 策略、工作目录和超时均属于服务端配置，不会出现在 MCP
+tool schema 中。
 
 ## 架构
 
-整套系统由两个协作的单例进程提供服务：
-
-1. **共享守护进程（Shared daemon）**——持有唯一 `VisionSession` 与所有 MCP 视觉工具。
-   默认 CLI 入口是一个*客户端*，把工具调用通过回环 HTTP 转发给这个守护进程。它通过并发
-   信号量串行化请求，并在 `idle_timeout_ms` 内无流量时自我回收。
-
-2. **视觉代理（Vision Proxy）**——上文所述的透明转发器，服务 agent 的文本模型客户端，
-   同样是单例。
-
-每个进程都通过 `~/.cache/lm-visual-mcp/` 下的 pidfile 以及监听其端口的 PID 来标识。
-见 [生命周期命令](#生命周期命令)。
-
----
-
-## 视觉代理
-
-### 使用方式
-
-把 agent 的 `base_url` 指向代理，仅此而已。代理把请求转发到从路径中解码出的真实 API URL。
-
 ```text
-http://127.0.0.1:8787/proxy/<协议路径>/<base64url(基础 API URL)>[<SDK 追加后缀>]
+MCP 客户端进程
+    │ stdio
+    ▼
+lm-visual-mcp client
+    │ loopback HTTP
+    ▼
+共享 daemon（一个 VisionSession）
+    ├── 选择任务 prompt
+    ├── 工作区与媒体暂存
+    ├── 全局并发限制
+    └── ProviderRouter ── AGY → Codex → Gemini → OpenCode
 ```
 
-- `<协议路径>`：`openai/chat`、`openai/responses`、`anthropic` —— **显式声明**，
-  绝不从 URL 或请求体推断。
-- `<base64url>`：对**基础 API URL**（域名，可含路径前缀，如
-  `https://api.openai.com` 或 `https://.../api/plan`）做 base64url 编码。
-- 无 querystring，只用 base64url。
-- **SDK 后缀拼接**：SDK（如 Anthropic SDK 用的 Claude Code）会在 base_url 后追加
-  endpoint 路径（如 `/v1/messages`）。代理扫描剩余路径段，认第一个能解码成完整
-  http(s) URL 的段作为基础 URL，并把其后段**拼回到解码出的 URL 上**再转发——
-  最终请求路径 = 基础 URL + SDK 追加后缀。这样网关收到的才是完整路径
-  （如 `https://.../api/plan/v1/messages`）。raw curl 不带后缀时，就只转发基础 URL。
-
 ```text
-http://127.0.0.1:8787/proxy/openai/chat/<b64-encoded-full-api-url>
-http://127.0.0.1:8787/proxy/openai/responses/<b64-encoded-full-api-url>
-http://127.0.0.1:8787/proxy/anthropic/<b64-encoded-full-api-url>
+OpenAI / Anthropic SDK
+    │ base_url 指向 proxy
+    ▼
+Vision Proxy
+    ├── 无图片：原始 request body 透传
+    └── 有图片：抽取 → 缓存/描述 → 替换为文本
+    │
+    ▼
+上游模型 API（响应与 SSE 流式返回；classifier 第一阶段有兼容性规范化）
 ```
 
-### 核心流程
-
-1. **无图片** → 字节级透明转发：仅剥离逐跳头（hop-by-hop headers），
-   `Authorization` / `x-api-key` 与 body 原样透传。
-2. **有图片** → 解析协议、抽取图片 → 每张图按 **SHA-256 缓存** 命中（命中则直接复用描述，
-   未命中则合并成**一次批量视觉调用**）→ 把请求里的图片部分改写为文本 → 再转发。
-3. 响应（含 SSE）**始终原样回传**，绝不改写。
-
-### 约束
-
-- 只支持 **OpenAI + Anthropic** 两种协议；支持两种 OpenAI 格式（Chat + Responses）。
-- **不抽取** `system_prompt` / `user_prompt`：只做一次通用 describe（“传感器”），
-  更深的细节留给文本模型自己调用 `lm-visual-mcp` 的 MCP 工具去挖掘。
-- 多图一次提交，一次批量 describe；缓存粒度 = **每张图片**（SHA-256），
-  视觉调用粒度 = **每次请求**。
-- describe 复用现有 `image_analysis.SYSTEM_PROMPT` 与 Provider Router，走相同的
-  提供商链路与自动降级。
-- 新增加依赖仅 `aiohttp`。
-
-### 为什么有它
-
-MCP 工具在 agent 侧需要显式调用；而文本模型自己的 API 客户端（OpenAI/Anthropic）是
-无法“看”图的。代理把“看图”变成 base_url 的替换，让普通 LLM 调用也具备视觉能力。
-
----
-
-## 特性
-
-- 8 个 Z.AI 兼容视觉工具 + 2 个别名。
-- 提供商无关的工具：工具 schema **不含** `provider`/`model`/`api_key`/`workdir`/`timeout`——
-  均为服务器配置。
-- 可配置顺序与降级策略的 Provider Router。
-- 统一结构化 JSON 输出（observations、texts、elements、bbox）。
-- 支持本地路径与 HTTP(S) URL；拒绝 `file://`。
-- 每任务隔离的工作区，自动清理。
-- CLI 原生图片（Codex `-i`、OpenCode `--file`）与 AGY 工作区 staging + 视觉能力探测。
-- Gemini API via `google-genai`。
-- `lm-visual-mcp doctor` 环境检查 + `--probe` 视觉冒烟测试。
-- **透明视觉代理**（OpenAI / Anthropic 协议，自动 describe + 缓存）。
-- **生命周期命令** `start` / `stop` / `restart`。
-- 无 ACP / 无非 transport 抽象（v1）。
-
----
+不带子命令运行 `lm-visual-mcp` 时，进程作为 MCP stdio 客户端：先探测共享 daemon 和
+Vision Proxy，缺失时自动拉起，再把 MCP 调用转给 daemon。`runtime.max_concurrency` 对所有
+已连接 MCP 客户端共同生效。daemon 在 `runtime.idle_timeout_ms` 无流量后退出；proxy 会持续
+运行，直到被显式停止。
 
 ## 环境要求
 
-- Python **3.11+**
-- macOS / Linux / Windows
-
----
+- Python 3.11+
+- 至少一个已配置的图片 provider：
+  - 已安装并登录的 `agy`、`codex` 或 `opencode` CLI；或
+  - 供 `google-genai` 使用的 Gemini API key。
+- macOS、Linux 的覆盖最完整。Windows 可完成基础启动，但 `stop`/端口 PID 探测仍依赖
+  POSIX 的 `ps` 和 `lsof`；见[当前限制](#当前限制)。
 
 ## 安装
 
-### 方式 A：pip（推荐用虚拟环境）
+从源码仓库安装：
 
 ```bash
-# macOS / Linux
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-# Windows (PowerShell)
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e .
+source .venv/bin/activate          # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -e .
 ```
 
-### 方式 B：uv（更快）
+开发和运行完整测试：
 
 ```bash
-uv venv --python 3.11 .venv
-source .venv/bin/activate                # Windows: .venv\Scripts\Activate.ps1
-uv pip install -e ".[dev]"               # dev = pytest, pytest-asyncio, Pillow（供 doctor --probe）
+python -m pip install -e ".[dev]"
 ```
 
-### 验证安装
+确认安装：
 
 ```bash
-lm-visual-mcp --version       # 确认可执行文件在 PATH 上
-lm-visual-mcp doctor          # 检查 4 个提供商：enabled / executable / model
-lm-visual-mcp doctor --probe  # 可选：跑一次真实 AGY 视觉冒烟测试（需 Pillow）
+lm-visual-mcp --version
+lm-visual-mcp doctor
 ```
 
-> Windows 下若 `lm-visual-mcp` 不在 PATH，用 `python -m lm_visual_mcp` 代替。
-
----
+如果 console script 不在 `PATH`，把示例中的 `lm-visual-mcp` 替换为
+`python -m lm_visual_mcp`。
 
 ## 快速上手
 
-### 1) 准备配置
+### 1. 配置 provider
 
 ```bash
-# 复制示例配置并按需修改
+mkdir -p ~/.config/lm-visual-mcp
 cp config.example.yaml ~/.config/lm-visual-mcp/config.yaml
-
-# 编辑：开启至少一个提供商，配置 Gemini 的 API Key（见下文）
 ```
 
-### 2) 以 MCP stdio 服务器运行
+编辑复制后的文件，禁用不用的 provider，并避免把凭证提交到仓库。使用 Gemini 时推荐设置
+环境变量：
 
 ```bash
-lm-visual-mcp --config ~/.config/lm-visual-mcp/config.yaml
-# 或
-python -m lm_visual_mcp --config ~/.config/lm-visual-mcp/config.yaml
+export GEMINI_API_KEY="..."
 ```
 
-无论打开多少个 Claude Code 会话，都只会有**一个**共享守护进程（`runtime.host:runtime.port`
-上的全局单例）。每个会话进程都会先探测它，已在运行就复用，否则自动拉起，然后代理到它。
-超过 `runtime.max_concurrency` 的请求会在守护进程内排队。守护进程在
-`runtime.idle_timeout_ms` 内无流量时自动退出。
-
-> **自动拉起（单例）** MCP 客户端启动时会自动确保 daemon 与 vision proxy 两个单例都在跑
-> （probe-then-launch）。视觉能力开箱即用，无需手动启动。
-
-### 3) 把文本模型客户端指向代理
-
-把客户端的 `base_url` 指向代理即可（适用于 OpenAI 或 Anthropic 协议）：
-
-```text
-http://127.0.0.1:8787/proxy/anthropic/<base64url(https://api.anthropic.com)>
-```
-
-例如 Claude Code 通过 `ANTHROPIC_BASE_URL` 指向它即可让文本模型自动“看图”。
-URL 格式与约束见 [视觉代理](#视觉代理)。
-
----
-
-## 生命周期命令
-
-默认 MCP 自动拉起，但 daemon 与 proxy 也可单独管理：
-
-```bash
-lm-visual-mcp start    [--service daemon|proxy]   # probe-then-launch，幂等
-lm-visual-mcp stop     [--service daemon|proxy]   # SIGTERM，幂等
-lm-visual-mcp restart  [--service daemon|proxy]   # 先停后启
-```
-
-- 无 `--service` 时同时管理 daemon + proxy（`stop`/`restart` 先停 proxy 再停 daemon）。
-- `stop` 优先读 pidfile + 进程 cmdline 校验（防止误杀被复用 PID 的无关进程），
-  兜底用 `lsof -ti tcp:<port>` 找端口监听 PID。
-- daemon / proxy 绑定成功后才写 pidfile（`~/.cache/lm-visual-mcp/`），`stop` 后清理。
-
----
-
-## MCP 客户端配置
+### 2. 添加到 MCP 客户端
 
 ```json
 {
   "mcpServers": {
     "vision": {
       "command": "lm-visual-mcp",
-      "args": ["--config", "/Users/me/.config/lm-visual-mcp/config.yaml"],
-      "env": { "GEMINI_API_KEY": "..." }
+      "args": [
+        "--config",
+        "/Users/me/.config/lm-visual-mcp/config.yaml"
+      ],
+      "env": {
+        "GEMINI_API_KEY": "..."
+      }
     }
   }
 }
 ```
 
----
+建议使用绝对配置路径。进程通过 stdout 传输 MCP，日志走 stderr。
+
+### 3. 可选：让模型 API 流量经过 Vision Proxy
+
+先把上游基础 API URL 编码成无 padding 的 base64url：
+
+```bash
+python -c "import base64; u=b'https://api.anthropic.com'; print(base64.urlsafe_b64encode(u).decode().rstrip('='))"
+```
+
+然后配置 SDK 的 base URL：
+
+```text
+http://127.0.0.1:8787/proxy/anthropic/aHR0cHM6Ly9hcGkuYW50aHJvcGljLmNvbQ
+```
+
+可用协议路径：
+
+```text
+/proxy/openai/chat/<base64url(基础 API URL)>
+/proxy/openai/responses/<base64url(基础 API URL)>
+/proxy/anthropic/<base64url(基础 API URL)>
+```
+
+支持 SDK 自动追加 endpoint。例如 Anthropic SDK 追加 `/v1/messages` 后，proxy 会把该后缀
+拼到解码出的上游基础 URL 上。
+
+当前行为需要特别注意：
+
+- 无图片时 request body 字节通常保持不变；唯一例外是识别到 classifier 且
+  `proxy.classifier.disable_thinking: true` 时会写入 `thinking: disabled`。
+- OpenAI adapter 支持 data URL 和 HTTP(S) 图片 URL。
+- Anthropic adapter 当前只支持 base64 图片 source。
+- 图片解析失败时会 fail-open，转发原始请求。
+- 发往 proxy endpoint 的 query string 当前不会转发。
+- proxy 必须只运行在受信任的 loopback 接口；见[安全](#安全)。
+
+### Claude Code Auto classifier 兼容
+
+Auto classifier 与普通请求使用同一个 Anthropic `/v1/messages` endpoint。Proxy 不依赖
+model 名或 token 数识别它，而是通过 security-monitor system marker 和无 tools 识别
+classifier 家族；其中带 `</block>` stop sequence 的请求被识别为已确认的二元第一阶段。
+
+识别后，`proxy.classifier.disable_thinking` 只控制**请求改写**。默认 `true`，向请求写入
+`"thinking": {"type": "disabled"}`；如果上游模型拒绝 disabled thinking，可设置为
+`false`。
+
+第一阶段 classifier 的**响应规范化始终启用**，不受该参数影响。部分
+Anthropic-compatible gateway 会忽略 `stop_sequences`，或把 thinking block 放在 text 前面。
+Proxy 会从 text block 中提取唯一、明确的 `<block>yes</block>` / `<block>no</block>` verdict，
+并恢复 Anthropic stop-sequence 语义：只返回一个内容为 `<block>yes` 或 `<block>no` 的 text
+block，同时设置 `stop_reason: "stop_sequence"`、`stop_sequence: "</block>"`。没有 verdict
+或同时出现冲突的 yes/no 时，proxy 不会猜测或改写。
+
+第一阶段的 `no` 通常表示直接放行，`yes` 表示可能需要后续阶段，并不一定是最终拒绝。
+完整的抓包结果、识别条件、误报/漏报边界和验证记录见
+[`classifier_compatibility.md`](classifier_compatibility.md)。
+
+## CLI
+
+```text
+lm-visual-mcp [--config PATH] [--log-level LEVEL]
+lm-visual-mcp doctor [--probe]
+lm-visual-mcp daemon
+lm-visual-mcp proxy [--host HOST] [--port PORT]
+lm-visual-mcp start   [--service daemon|proxy]
+lm-visual-mcp stop    [--service daemon|proxy]
+lm-visual-mcp restart [--service daemon|proxy]
+lm-visual-mcp --version
+```
+
+公共选项可写在子命令之前或之后。不指定 `--service` 时，生命周期命令同时管理 daemon 和
+proxy。`doctor --probe` 会执行一次真实 AGY 图片冒烟测试，需要 Pillow 和可用的 AGY CLI；
+它不会对所有 provider 发起可能产生费用的真实调用。
+
+Pidfile 和 daemon 日志位于 `~/.cache/lm-visual-mcp/`。
 
 ## 配置
 
-配置优先级：**CLI 参数 > 环境变量 > 配置文件 > 内置默认值**。
+配置优先级：
+
+```text
+CLI 参数 > 环境变量 > YAML 文件 > 内置默认值
+```
+
+未传 `--config` 时的搜索顺序：
+
+1. `LM_VISUAL_MCP_CONFIG`
+2. `./lm-visual-mcp.yaml`
+3. `~/.config/lm-visual-mcp/config.yaml`
+4. `~/.config/lm-visual-mcp/lm-visual-mcp.yaml`
+
+所有当前字段见 [`config.example.yaml`](config.example.yaml)。最小示例：
 
 ```yaml
 version: 1
 
 providers:
-  order: [agy, codex, gemini, opencode]
+  order: [codex, gemini, opencode]
   agy:
-    enabled: true
+    enabled: false
     command: agy
-    model: gemini-3.6-flash
-    effort: high
   codex:
     enabled: true
     command: codex
-    model: gpt-5.6-luna
+    model: null
     effort: high
   gemini:
     enabled: true
-    model: gemini-3.6-flash
+    model: null
     effort: high
     api_key_env: GEMINI_API_KEY
   opencode:
@@ -318,12 +246,12 @@ providers:
     effort: null
 
 runtime:
-  workdir: null          # null => 每任务临时目录
+  workdir: null
   timeout: 120
   max_concurrency: 2
-  host: 127.0.0.1        # 共享守护进程绑定 host
-  port: 6506             # 共享守护进程绑定 port
-  idle_timeout_ms: 300000 # daemon 空闲自动退出
+  host: 127.0.0.1
+  port: 6506
+  idle_timeout_ms: 300000
 
 fallback:
   enabled: true
@@ -346,196 +274,160 @@ media:
 logging:
   level: INFO
 
-# 透明视觉代理（lm-visual-mcp proxy）
 proxy:
   host: 127.0.0.1
   port: 8787
+  classifier:
+    disable_thinking: true
 ```
-
-### 提供商顺序
-
-路由按配置顺序尝试提供商，失败即降级。默认：`agy → codex → gemini → opencode`。
-
-默认不可降级的错误：`invalid_input`、`invalid_model`、`config_error`。`fallback.on` 列表是最终依据。
-
-### 提供商模型
-
-每个提供商的模型都在配置里设置，降级时自动使用——无需管理跨提供商的模型命名空间。
-把模型设为 `null` 则让提供商使用自己的默认。
-
-```yaml
-providers:
-  agy:      { model: gemini-xxx }
-  codex:    { model: gpt-xxx }
-  gemini:   { model: gemini-xxx }
-  opencode: { model: google/gemini-xxx }
-```
-
-### 思考强度
-
-每个提供商的思考强度用 `effort`（`low` | `medium` | `high` | `xhigh`，随提供商而异；
-`null` = 提供商默认）配置，并在运行时透传：
-
-- **AGY** → `--effort`
-- **Codex** → `-c model_reasoning_effort=<effort>`
-- **Gemini** → `thinking_config`（思考级别）
-- **OpenCode** → `--variant`
-
-### Gemini API key
-
-API Key **永远不是**工具参数。解析顺序：
-
-```text
-LM_VISUAL_MCP_GEMINI_API_KEY
-    > config.providers.gemini.api_key_env（它命名的环境变量）
-    > GEMINI_API_KEY
-```
-
-为兼容，配置文件中也可放明文 `api_key`；它以 `SecretStr` 存储，绝不打印、绝不导出、
-绝不出现在 MCP 响应或异常中。推荐用环境变量。
 
 ### 环境变量
 
 ```text
-LM_VISUAL_MCP_CONFIG                 配置文件路径
-LM_VISUAL_MCP_WORKDIR                runtime workdir
-LM_VISUAL_MCP_TIMEOUT                runtime timeout (s)
-LM_VISUAL_MCP_MAX_CONCURRENCY        max concurrency（超出则排队）
-LM_VISUAL_MCP_HOST                   daemon 绑定 host（默认 127.0.0.1）
-LM_VISUAL_MCP_PORT                   daemon 绑定 port（默认 6506）
-LM_VISUAL_MCP_IDLE_TIMEOUT_MS        daemon 空闲退出超时（默认 300000）
+LM_VISUAL_MCP_CONFIG
+LM_VISUAL_MCP_WORKDIR
+LM_VISUAL_MCP_TIMEOUT
+LM_VISUAL_MCP_MAX_CONCURRENCY
+LM_VISUAL_MCP_HOST
+LM_VISUAL_MCP_PORT
+LM_VISUAL_MCP_IDLE_TIMEOUT_MS
+
 LM_VISUAL_MCP_AGY_COMMAND / _MODEL / _EFFORT
 LM_VISUAL_MCP_CODEX_COMMAND / _MODEL / _EFFORT
 LM_VISUAL_MCP_GEMINI_MODEL / _API_KEY / _EFFORT
-GEMINI_API_KEY                       gemini API key（兜底）
 LM_VISUAL_MCP_OPENCODE_COMMAND / _MODEL / _EFFORT
-LM_VISUAL_MCP_PROXY_HOST             代理绑定 host（默认 127.0.0.1）
-LM_VISUAL_MCP_PROXY_PORT             代理绑定 port（默认 8787）
-LM_VISUAL_MCP_LOG_LEVEL              ERROR | WARNING | INFO | DEBUG
+
+GEMINI_API_KEY
+LM_VISUAL_MCP_PROXY_HOST
+LM_VISUAL_MCP_PROXY_PORT
+LM_VISUAL_MCP_PROXY_CLASSIFIER_DISABLE_THINKING
+LM_VISUAL_MCP_LOG_LEVEL
 ```
 
-### 工作目录
+Gemini 凭证解析顺序为：`LM_VISUAL_MCP_GEMINI_API_KEY`、兼容用的明文
+`providers.gemini.api_key`、`api_key_env` 指向的环境变量、`GEMINI_API_KEY`。推荐使用
+`api_key_env`；配置文件明文 key 只为兼容而保留。
 
-`runtime.workdir: null`（默认）时，每任务使用全新临时目录，完成后清理。配置了项目工作目录时，
-任务媒体暂存于 `<workdir>/.lm-visual-mcp/<uuid>/` 并在之后移除。用户的文件永不被修改或删除。
+### 工作区与媒体
 
-### 媒体限制
+`runtime.workdir: null` 时，每次 MCP 调用创建临时目录并在调用后删除。指定 workdir 时，
+文件暂存到 `<workdir>/.lm-visual-mcp/<uuid>/`，任务结束后删除该任务目录。源文件只复制，
+不会被修改。
 
-图片：png/jpg/jpeg/webp/gif/bmp/tiff（默认 `max_image_mb: 20`）。视频：mp4/mov/m4v
-（`max_video_mb: 8`）。远程下载受超时、大小与重定向次数限制，并按 MIME 类型校验。
+MCP 图片类型：PNG、JPEG、WebP、GIF、BMP、TIFF。媒体层接受 MP4、MOV、M4V 视频扩展名，
+但当前 provider 支持不完整。拒绝 `file://` URL；请使用本地路径或 HTTP(S) URL。
 
----
+## MCP 工具
 
-## 工具
+| 工具 | 必填输入 | 可选输入 | 用途 |
+|---|---|---|---|
+| `ui_to_artifact` | `image_source`, `output_type`, `prompt` | - | UI 转代码、prompt、spec 或描述 |
+| `extract_text_from_screenshot` | `image_source`, `prompt` | `programming_language` | OCR/代码提取 |
+| `diagnose_error_screenshot` | `image_source`, `prompt` | `context` | 报错与堆栈诊断 |
+| `understand_technical_diagram` | `image_source`, `prompt` | `diagram_type` | 架构/UML/流程分析 |
+| `analyze_data_visualization` | `image_source`, `prompt` | `analysis_focus` | 图表分析 |
+| `ui_diff_check` | `expected_image_source`, `actual_image_source`, `prompt` | - | 视觉回归对比 |
+| `analyze_image` | `image_source`, `prompt` | - | 通用图片分析 |
+| `analyze_video` | `video_source`, `prompt` | - | 兼容/实验性视频入口 |
 
-| 工具 | 用途 |
-|------|---------|
-| `ui_to_artifact` | UI 截图转 `code` / `prompt` / `spec` / `description` |
-| `extract_text_from_screenshot` | 逐字 OCR 代码 / 终端 / 配置 / 文档 |
-| `diagnose_error_screenshot` | 诊断报错 / 堆栈 / 根因 / 修复建议 |
-| `understand_technical_diagram` | 理解架构 / 流程图 / UML / ER 图 |
-| `analyze_data_visualization` | 分析图表：趋势、异常、对比、分布 |
-| `ui_diff_check` | 对比 EXPECTED vs ACTUAL UI 视觉回归 |
-| `analyze_image` | 通用视觉分析 |
-| `analyze_video` | 视频分析（mp4/mov/m4v） |
+别名：`image_analysis` → `analyze_image`；`video_analysis` → `analyze_video`。
 
-别名共享同一实现：`image_analysis` → `analyze_image`、`video_analysis` → `analyze_video`。
-
----
-
-## 结构化输出
-
-每个提供商的输出都被归一化到统一 schema，并包装成标准信封：
+## 响应格式
 
 ```json
 {
   "provider": "codex",
-  "model": "gpt-xxx",
+  "model": "configured-model",
   "result": {
-    "summary": "Short visual summary",
-    "answer": "Direct answer",
-    "observations": [{ "type": "text", "text": "...", "confidence": 0.95 }],
-    "texts": [{ "text": "visible text", "bbox": [100, 100, 900, 200], "confidence": 0.98 }],
-    "elements": [{ "label": "Build button", "type": "ui_element", "bbox": [700, 20, 820, 70], "confidence": 0.93 }],
-    "warnings": []
+    "summary": "简短摘要",
+    "answer": "直接回答",
+    "observations": [],
+    "texts": [],
+    "elements": [],
+    "warnings": [],
+    "details": {}
   },
   "meta": {
-    "duration_ms": 4812,
+    "duration_ms": 4812.0,
     "fallbacks": [],
-    "usage": { "input_tokens": null, "output_tokens": null }
+    "usage": {}
   }
 }
 ```
 
-`bbox` 归一化为 `0..1000` 的 `[x_min, y_min, x_max, y_max]`。无法确定的值不猜测——省略并加警告。
+为了可观测性，响应可以包含 `provider` 和 `model`，但调用方不能选择它们。bbox 约定采用
+`0..1000` 范围的 `[x_min, y_min, x_max, y_max]`；当前尚未严格执行范围校验。
 
----
+## Provider 说明
 
-## 环境诊断
+- **AGY**：把图片暂存到 added directory，以 `--sandbox` 调用 `agy`，并从真实请求中发现
+  图片能力。Headless 图片访问可能不稳定，因此失败时会降级到下一个 provider。
+- **Codex**：重复使用 `-i`，强制只读 sandbox，并通过 `--output-schema` 约束输出。
+- **Gemini**：使用 `google-genai`、结构化 JSON 和多图片 part。
+- **OpenCode**：重复使用 `--file`，解析 JSON event stream。
 
-```bash
-lm-visual-mcp doctor
-lm-visual-mcp doctor --probe   # 额外跑一次真实 AGY 视觉冒烟测试（需 Pillow）
-lm-visual-mcp --version
-```
-
-`doctor` 绝不打印 API Key 内容。
-
----
-
-## 提供商探测
-
-- **AGY**: `agy -p "<prompt>" --output-format json`。图片暂存到工作区媒体目录，以裸文件名引用。
-  AGY 忽略 shell 工作目录，总是在自己的工作区运行工具，因此媒体目录通过 `--add-dir`（可重复）
-  注册；已加入目录中的文件可原生读取。服务器在沙箱（`--sandbox`）中启动 AGY。没有独立的视觉
-  探测——每个图片请求恰好是一次真实 AGY 调用，视觉能力从该调用的结果中发现并缓存。
-- **Codex**: `codex exec -i <img> ... --output-schema ... -s read-only`。原生传图；
-  强制只读沙箱。
-- **Gemini**: `google-genai`，结构化 JSON，多图，配置模型。
-- **OpenCode**: `opencode run --format json`，图片经 `--file`，解析 JSON 事件流取最终助手结果。
-
-> **AGY 非确定性**：AGY 从 `--add-dir` 注册的目录读取图片。截至 AGY CLI 1.1.x，
-> headless 模式仍非确定——一次运行可能间歇性地索要它并不拥有的工具权限。发生时服务器会检测并
-> 透明降级到下一个提供商。`lm-visual-mcp doctor --probe` 会报告能力而不终止服务器。
-
----
+当前未固定 CLI 最低兼容版本；升级 provider CLI 后建议运行 `doctor`。
 
 ## 安全
 
-服务器只 `LOOK / READ / UNDERSTAND / COMPARE / ANALYZE`——从不
-`EDIT / BUILD / EXECUTE / MODIFY`。Codex 在只读沙箱中运行；AGY 与 OpenCode 从不带危险
-的自动批准启动。API Key 从所有日志与响应中脱敏。
+安全部署模型是：受信任的单用户机器，两个 listener 都绑定 `127.0.0.1`。
 
-代理透传 API Key 与 body（仅剥离逐跳头）；自身不持有任何账号状态。
+- 不要把 daemon 6506 或 proxy 8787 端口暴露到局域网或公网。
+- daemon `/tool` 没有认证。
+- proxy 会把 Authorization/API key header 转发给路径中编码的上游，并能抓取 HTTP(S)
+  图片 URL。当前没有上游 allowlist，也不会阻止私网图片目标；暴露 proxy 会产生 SSRF 和
+  凭证转发风险。
+- data URL 和 Anthropic base64 图片尚未获得与下载图片完全相同的大小校验。
+- MCP 本地路径工具能读取调用方提交的路径，只应向受信任 agent 开放。
+- 不要在 YAML 中放明文 API key。代码会避免主动记录 key，但尚未实现完整的按值日志脱敏。
 
----
+原始 MCP 与 proxy 需求保留在 [`mcp_plan.md`](mcp_plan.md) 和
+[`proxy_plan.md`](proxy_plan.md)。当前全仓库审查结论、风险分级和整改优先级见
+[`code_review.md`](code_review.md)；Auto classifier 抓包与兼容细节见
+[`classifier_compatibility.md`](classifier_compatibility.md)。
+
+## 当前限制
+
+- `analyze_video`/`video_analysis` 已注册，但 Codex、Gemini、OpenCode 会拒绝视频；AGY
+  目前也拿不到可靠的暂存视频引用。应按“不支持视频”处理。
+- Proxy endpoint 的 query string 会被丢弃。
+- Proxy 图片解析失败会 fail-open，转发原始图片请求。
+- Proxy 的 base64/data 图片需要统一 MIME 与大小校验。
+- Proxy 上游和远程图片 URL 没有可配置 allowlist/私网策略。
+- Windows 的 `stop`/`restart` 进程探测不完整。
+- 数值配置尚未执行范围校验。
+- MCP 冒烟测试可能出现依赖库的 Pydantic forward-reference warning，目前不导致测试失败。
 
 ## 开发
 
 ```bash
-python -m pytest
+.venv/bin/python -m pytest -q
 ```
 
-测试覆盖配置、路由、工作区、媒体、四个提供商（mock 子进程 / genai）、Z.AI 工具 schema
-兼容性、代理适配器 + 缓存，以及 MCP `tools/list` + `tools/call` 冒烟测试。
+审查时的基线是在允许绑定本机临时回环端口的环境中 **118 tests passed**。在受限 sandbox
+里，daemon/proxy socket 测试可能因 `PermissionError` 失败，但非网络测试仍可运行。
 
----
+`mcp_plan.md` 和 `proxy_plan.md` 保留原始需求与历史内容。当前审查结果单独记录在
+[`code_review.md`](code_review.md)，已完成的 Auto classifier 兼容修改、实测证据与风险
+边界记录在 [`classifier_compatibility.md`](classifier_compatibility.md)。
 
 ## 故障排查
 
-- **`agy` 对图片降级到 codex** — AGY 从 `--add-dir` 注册的目录读图。Headless 模式
-  非确定，可能间歇性自动拒绝工具权限。媒体目录可原生读取，因此无需 `read_file` 或
-  `command(ls)` 授权，且**绝不能**配置 `command(*)`。仍失败时服务器透明降级。
-  用 `lm-visual-mcp doctor --probe` 直接测试 AGY。
-- **无响应** — 没有启用任何提供商。请在配置中启用提供商。
-- **Gemini 未使用** — 需要 API Key；见 “Gemini API key”。
-- **Codex 阻塞等待 stdin** — 服务器始终为 CLI 提供商关闭 stdin。
-- **stdout 损坏** — 所有日志走 stderr；stdout 专用于 MCP。
-- **代理不转发** — 确认 base_url 指向 `/proxy/<协议路径>/<base64url(基础 API URL)>`，
-  且 daemon 与 proxy 单例已启动（`lm-visual-mcp start` / `lm-visual-mcp doctor`）。
-
----
+- **所有 provider 都失败**：运行 `lm-visual-mcp doctor`，禁用不可用 provider，并检查
+  CLI 登录状态或 Gemini key。
+- **AGY 意外 fallback**：运行 `lm-visual-mcp doctor --probe`；AGY headless 图片访问可能
+  间歇性失败。
+- **Codex 阻塞或不能写文件**：服务端会关闭 stdin，并且刻意使用只读 sandbox。
+- **MCP stdout 被污染**：确认 wrapper/provider CLI 没有向 MCP 进程 stdout 打印；项目日志
+  使用 stderr。
+- **Proxy route 返回 400/404**：确认显式协议路径正确，并使用无 padding base64url，不要用
+  可能包含 `/` 的标准 base64。
+- **Proxy 无法访问上游**：确认解码出的 base URL 完整，且不依赖 query string。
+- **Auto Mode 显示 classifier unavailable**：确认请求命中了 Anthropic proxy，检查上游是否
+  拒绝长 system prompt、cache-control 或 thinking 字段；不要只依据 UI 文案判断为网络故障。
+  若上游拒绝 disabled thinking，设置
+  `LM_VISUAL_MCP_PROXY_CLASSIFIER_DISABLE_THINKING=false`，响应规范化仍会保留。
 
 ## 许可
 
-MIT
+MIT，见 [`LICENSE`](LICENSE)。

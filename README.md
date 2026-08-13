@@ -1,303 +1,247 @@
 # Vision MCP Server
 
-> **English** | [**简体中文**](README.zh-CN.md)
+> **English** | [简体中文](README.zh-CN.md)
 
-A **Vision MCP Server** that gives text-only LLMs / coding agents visual
-capabilities over the [Model Context Protocol](https://modelcontextprotocol.io).
-It also ships a **Vision Proxy** — a transparent HTTP forwarder that lets a
-text-only model's normal API client "see" images without any code change.
+`lm-visual-mcp` gives text-only LLMs and coding agents visual input through the
+[Model Context Protocol](https://modelcontextprotocol.io). It also includes an optional
+HTTP Vision Proxy that converts image blocks in OpenAI or Anthropic requests into text
+descriptions before forwarding them upstream. The proxy also handles Claude Code Auto
+classifier interoperability with Anthropic-compatible gateways.
 
----
+This repository is currently at **v0.1.0**. Image analysis is the supported core path;
+video tool names are exposed for compatibility, but no provider currently has a reliable
+end-to-end video attachment path. See [Current limitations](#current-limitations).
 
-## Table of Contents
+## What it provides
 
-- [Why a Vision MCP?](#why-a-vision-mcp)
-- [Architecture](#architecture)
-- [Vision Proxy](#vision-proxy)
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Quick start](#quick-start)
-- [Lifecycle commands](#lifecycle-commands)
-- [MCP client configuration](#mcp-client-configuration)
-- [Configuration](#configuration)
-- [Tools](#tools)
-- [Structured output](#structured-output)
-- [Doctor](#doctor)
-- [Provider detection](#provider-detection)
-- [Security](#security)
-- [Development](#development)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
+- 8 task-oriented vision tools plus 2 compatibility aliases.
+- Server-controlled provider routing: AGY → Codex → Gemini → OpenCode by default.
+- Per-task workspaces and bounded media downloads.
+- A shared local daemon, reused by multiple MCP client processes.
+- Unified JSON results regardless of provider.
+- A transparent OpenAI Chat, OpenAI Responses, and Anthropic Messages proxy.
+- Claude Code Auto classifier request and first-stage response compatibility.
+- Lifecycle and environment diagnostics through the CLI.
 
----
-
-## Why a Vision MCP?
-
-Most coding agents / text-only LLMs cannot "see" screenshots, error traces, UI
-mockups or diagrams. This server acts as their eyes:
-
-```text
-Text-only LLM
-      │  MCP
-      ▼
-Vision MCP Server
-   ├── Z.AI-compatible Vision Tools
-   ├── Specialized Prompt Layer
-   ├── Media / Workspace Layer
-   ├── Structured JSON Layer
-   └── Provider Router (AGY → Codex → Gemini → OpenCode)
-```
-
-```
-Text-only LLM
-      │  HTTP (base_url points at the proxy)
-      ▼
-Vision Proxy (openai/chat · openai/responses · anthropic)
-      │  no image => byte-level passthrough; image => describe + rewrite to text
-      ▼
-Real OpenAI / Anthropic API
-```
-
----
+Provider, model, credentials, fallback policy, workdir, and timeout are server
+configuration. They are deliberately absent from MCP tool schemas.
 
 ## Architecture
 
-Two cooperating singletons serve the whole setup:
-
-1. **Shared daemon** — a single global instance that owns the one `VisionSession`
-   and every MCP vision tool. The default CLI entry is a *client* that forwards
-   tool calls over loopback HTTP to this daemon. It serializes requests through a
-   concurrency semaphore and reclaims itself after `idle_timeout_ms` of no
-   traffic.
-
-2. **Vision Proxy** — the transparent forwarder described above, serving the
-   agent's text-model client. It is also a singleton.
-
-Each is identified by a pidfile under `~/.cache/lm-visual-mcp/` plus the PID
-listening on its port. See [Lifecycle commands](#lifecycle-commands).
-
----
-
-## Vision Proxy
-
-### How to point at it
-
-Point the agent's `base_url` at the proxy and nothing else. The proxy forwards
-to the real API URL that is decoded from the path.
-
 ```text
-http://127.0.0.1:8787/proxy/<protocol-path>/<base64url(base API URL)>[<SDK suffix>]
+MCP client process
+    │ stdio
+    ▼
+lm-visual-mcp client
+    │ loopback HTTP
+    ▼
+shared daemon (one VisionSession)
+    ├── prompt selection
+    ├── workspace/media staging
+    ├── concurrency limit
+    └── ProviderRouter ── AGY → Codex → Gemini → OpenCode
 ```
 
-- `<protocol-path>`: `openai/chat`, `openai/responses`, `anthropic` — **explicit**,
-  never inferred from the URL or the request body.
-- `<base64url>`: base64url of the **base API URL** (the host, optionally with a
-  path prefix, e.g. `https://api.openai.com` or `https://.../api/plan`).
-- No querystring — only base64url.
-- **SDK-suffix rebasing**: the Anthropic SDK appends the endpoint path (e.g.
-  `/v1/messages`) to `base_url`. The proxy matches the protocol path as a prefix,
-  scans the remaining segments for the first one that decodes to a full http(s)
-  URL (the base), and **appends the later segments back onto it** before
-  forwarding — the final upstream path is base + SDK suffix (e.g.
-  `https://.../api/plan/v1/messages`). A raw curl with no suffix forwards the
-  base URL as-is.
-
 ```text
-http://127.0.0.1:8787/proxy/openai/chat/<b64-encoded-full-api-url>
-http://127.0.0.1:8787/proxy/openai/responses/<b64-encoded-full-api-url>
-http://127.0.0.1:8787/proxy/anthropic/<b64-encoded-full-api-url>
+OpenAI / Anthropic SDK
+    │ base_url points at the proxy
+    ▼
+Vision Proxy
+    ├── no image: forward the original request body
+    └── image: extract → cache/describe → replace with text
+    │
+    ▼
+upstream model API (responses/SSE stream back; classifier stage one is normalized)
 ```
 
-### Core flow
-
-1. **No image** → byte-level passthrough: only hop-by-hop headers are stripped;
-   `Authorization` / `x-api-key` and the body pass through untouched.
-2. **Image present** → parse + extract images → per-image **SHA-256 cache** lookup
-   (hit = reuse; miss = one **batched** vision call) → rewrite the image parts into
-   text → forward.
-3. The response (including SSE) is always piped back untouched.
-
-### Constraints
-
-- Only **OpenAI + Anthropic** protocols; both OpenAI formats (Chat + Responses).
-- No `system_prompt` / `user_prompt` extraction: one generic describe (a "sensor")
-  only. Deeper digging is left to the text model calling the MCP vision tools itself.
-- Multi-image submitted in one request, one batched describe; cache granularity =
-  **per image** (SHA-256), vision-call granularity = **per request**.
-- describe reuses the existing `image_analysis.SYSTEM_PROMPT` and the Provider
-  Router — the same provider chain and fallback.
-- The only new dependency is `aiohttp`.
-
-### Why it exists
-
-MCP tools must be called explicitly by the agent; the text model's own API client
-cannot "see". The proxy turns vision into a base_url swap, giving ordinary LLM
-calls vision for free.
-
----
-
-## Features
-
-- 8 Z.AI-compatible vision tools + 2 aliases.
-- Provider-neutral tools: **no** `provider`/`model`/`api_key`/`workdir`/`timeout`
-  in tool schemas — those are server config.
-- Provider Router with configurable order and fallback policy.
-- Unified structured JSON output (observations, texts, elements, bbox).
-- Local paths and HTTP(S) URLs; `file://` rejected.
-- Per-task isolated workspaces; automatic cleanup.
-- CLI-native images (Codex `-i`, OpenCode `--file`) and AGY workspace staging
-  with vision-capability detection.
-- Gemini API via `google-genai`.
-- `lm-visual-mcp doctor` environment inspection + `--probe` vision smoke test.
-- **Transparent Vision Proxy** (OpenAI / Anthropic protocols, auto-describe + cache).
-- **Lifecycle commands** `start` / `stop` / `restart`.
-- No ACP / no transport abstraction in v1.
-
----
+Running `lm-visual-mcp` without a subcommand starts an MCP stdio client. It probes the
+shared daemon and Vision Proxy, starts missing services, then forwards MCP calls to the
+daemon. `runtime.max_concurrency` limits work across all connected MCP clients. The daemon
+exits after `runtime.idle_timeout_ms` without traffic; the proxy remains running until it
+is stopped.
 
 ## Requirements
 
-- Python **3.11+**
-- macOS / Linux / Windows
-
----
+- Python 3.11+
+- At least one configured image-capable provider:
+  - an installed and authenticated `agy`, `codex`, or `opencode` CLI; or
+  - a Gemini API key for `google-genai`.
+- macOS and Linux are the best-covered platforms. Basic startup works on Windows, but
+  `stop`/port-PID discovery still relies on POSIX `ps` and `lsof`; see
+  [Current limitations](#current-limitations).
 
 ## Installation
 
-### Method A: pip (venv recommended)
+From a source checkout:
 
 ```bash
-# macOS / Linux
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-# Windows (PowerShell)
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e .
+source .venv/bin/activate          # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -e .
 ```
 
-### Method B: uv (faster)
+For development and the full test suite:
 
 ```bash
-uv venv --python 3.11 .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
-uv pip install -e ".[dev]"           # dev = pytest, pytest-asyncio, Pillow (for doctor --probe)
+python -m pip install -e ".[dev]"
 ```
 
-### Verify
+Verify the installation:
 
 ```bash
-lm-visual-mcp --version      # binary on PATH
-lm-visual-mcp doctor         # inspect the 4 providers: enabled / executable / model
-lm-visual-mcp doctor --probe # optional: real AGY vision smoke test (needs Pillow)
+lm-visual-mcp --version
+lm-visual-mcp doctor
 ```
 
-> On Windows, if `lm-visual-mcp` isn't on PATH, use `python -m lm_visual_mcp`.
-
----
+If the console script is not on `PATH`, use `python -m lm_visual_mcp` in every example.
 
 ## Quick start
 
-### 1) Prepare config
+### 1. Configure providers
 
 ```bash
-# Copy the example config and edit it to suit your machine.
+mkdir -p ~/.config/lm-visual-mcp
 cp config.example.yaml ~/.config/lm-visual-mcp/config.yaml
-
-# Edit: enable at least one provider, set the Gemini API key (see below).
 ```
 
-### 2) Run as an MCP stdio server
+Edit the copied file. Disable providers you do not use, and avoid committing credentials.
+For Gemini, set an environment variable:
 
 ```bash
-lm-visual-mcp --config ~/.config/lm-visual-mcp/config.yaml
-# or
-python -m lm_visual_mcp --config ~/.config/lm-visual-mcp/config.yaml
+export GEMINI_API_KEY="..."
 ```
 
-No matter how many Claude Code sessions open, only **one** shared daemon runs
-(global single instance on `runtime.host:runtime.port`). Each session probes for
-it, proxies to it if present, or auto-starts it, then reuses it. Requests beyond
-`runtime.max_concurrency` queue inside the daemon. The daemon exits itself after
-`runtime.idle_timeout_ms` of no traffic.
-
-> **Auto-launch (singleton)** On MCP client start, both the daemon and the vision
-> proxy singletons are auto-started (probe-then-launch). Vision works out of the box.
-
-### 3) Point a text-model client at the proxy
-
-Point the client's `base_url` at the proxy (works for OpenAI or Anthropic):
-
-```text
-http://127.0.0.1:8787/proxy/anthropic/<base64url(https://api.anthropic.com)>
-```
-
-For example, Claude Code can point `ANTHROPIC_BASE_URL` at it so its text model
-"sees" images automatically. See [Vision Proxy](#vision-proxy) for the URL format
-and constraints.
-
----
-
-## Lifecycle commands
-
-By default MCP auto-starts them, but you can manage the two singletons
-independently:
-
-```bash
-lm-visual-mcp start    [--service daemon|proxy]   # probe-then-launch, idempotent
-lm-visual-mcp stop     [--service daemon|proxy]   # SIGTERM, idempotent
-lm-visual-mcp restart  [--service daemon|proxy]   # stop then start
-```
-
-- Without `--service`, both are managed (`stop`/`restart` stop proxy before daemon).
-- `stop` prefers pidfile + process-cmdline check (avoids killing an unrelated
-  process that reused the PID), falling back to the PID listening on the port.
-- The pidfile is written only after a successful bind, and removed on `stop`.
-
----
-
-## MCP client configuration
+### 2. Add the MCP server to a client
 
 ```json
 {
   "mcpServers": {
     "vision": {
       "command": "lm-visual-mcp",
-      "args": ["--config", "/Users/me/.config/lm-visual-mcp/config.yaml"],
-      "env": { "GEMINI_API_KEY": "..." }
+      "args": [
+        "--config",
+        "/Users/me/.config/lm-visual-mcp/config.yaml"
+      ],
+      "env": {
+        "GEMINI_API_KEY": "..."
+      }
     }
   }
 }
 ```
 
----
+Use an absolute config path. The process speaks MCP over stdout; logs go to stderr.
+
+### 3. Optional: route model API traffic through the Vision Proxy
+
+Encode the upstream base API URL as unpadded base64url:
+
+```bash
+python -c "import base64; u=b'https://api.anthropic.com'; print(base64.urlsafe_b64encode(u).decode().rstrip('='))"
+```
+
+Then configure the SDK base URL:
+
+```text
+http://127.0.0.1:8787/proxy/anthropic/aHR0cHM6Ly9hcGkuYW50aHJvcGljLmNvbQ
+```
+
+Available protocol paths are:
+
+```text
+/proxy/openai/chat/<base64url(base API URL)>
+/proxy/openai/responses/<base64url(base API URL)>
+/proxy/anthropic/<base64url(base API URL)>
+```
+
+SDK-appended endpoint paths are supported. For example, an Anthropic SDK may append
+`/v1/messages`; the proxy rebases that suffix onto the decoded upstream base URL.
+
+Important current behavior:
+
+- Image-free requests normally keep their body bytes unchanged. The exception is a detected
+  classifier when `proxy.classifier.disable_thinking: true`, which inserts `thinking: disabled`.
+- OpenAI adapters accept data URLs and HTTP(S) image URLs.
+- The Anthropic adapter currently accepts base64 image sources.
+- Image parse failures fail open and forward the original request.
+- Query strings sent to the proxy endpoint are currently not forwarded.
+- The proxy must remain on a trusted loopback interface; see [Security](#security).
+
+### Claude Code Auto classifier compatibility
+
+Auto classifier calls use the same Anthropic `/v1/messages` endpoint as ordinary requests.
+The proxy identifies them by their protocol contract rather than a model name or token count:
+the security-monitor system marker and absence of tools identify the classifier family; a
+`</block>` stop sequence identifies its known binary first stage.
+
+For a detected classifier request, `proxy.classifier.disable_thinking` controls request
+rewriting only. It defaults to `true` and inserts `"thinking": {"type": "disabled"}`. Set it
+to `false` for an upstream model that rejects disabled thinking.
+
+First-stage classifier response normalization is always enabled and is independent of that
+option. Some Anthropic-compatible gateways ignore `stop_sequences` or return a leading thinking
+block. The proxy extracts one unambiguous `<block>yes</block>` or `<block>no</block>` text verdict
+and restores Anthropic stop-sequence framing: a single text block containing `<block>yes` or
+`<block>no`, with `stop_reason: "stop_sequence"` and `stop_sequence: "</block>"`. A response
+with no verdict or conflicting yes/no verdicts is not guessed or rewritten.
+
+In stage one, `no` normally allows the action while `yes` indicates that a later stage may be
+needed; it is not necessarily a final denial. See
+[`classifier_compatibility.md`](classifier_compatibility.md) for the captured payload, exact
+detection rules, false-positive/false-negative boundaries, and verification record.
+
+## CLI
+
+```text
+lm-visual-mcp [--config PATH] [--log-level LEVEL]
+lm-visual-mcp doctor [--probe]
+lm-visual-mcp daemon
+lm-visual-mcp proxy [--host HOST] [--port PORT]
+lm-visual-mcp start   [--service daemon|proxy]
+lm-visual-mcp stop    [--service daemon|proxy]
+lm-visual-mcp restart [--service daemon|proxy]
+lm-visual-mcp --version
+```
+
+Common options may be placed before or after a subcommand. Without `--service`, lifecycle
+commands manage both services. `doctor --probe` performs a real AGY image smoke test and
+requires Pillow plus a working AGY CLI; it does not probe every provider with a paid call.
+
+Pidfiles and daemon logs live under `~/.cache/lm-visual-mcp/`.
 
 ## Configuration
 
-Configuration priority: **CLI argument > environment variable > config file >
-built-in default**.
+Configuration priority is:
+
+```text
+CLI option > environment variable > YAML file > built-in default
+```
+
+Config search order when `--config` is omitted:
+
+1. `LM_VISUAL_MCP_CONFIG`
+2. `./lm-visual-mcp.yaml`
+3. `~/.config/lm-visual-mcp/config.yaml`
+4. `~/.config/lm-visual-mcp/lm-visual-mcp.yaml`
+
+See [`config.example.yaml`](config.example.yaml) for every current field. A minimal example:
 
 ```yaml
 version: 1
 
 providers:
-  order: [agy, codex, gemini, opencode]
+  order: [codex, gemini, opencode]
   agy:
-    enabled: true
+    enabled: false
     command: agy
-    model: gemini-3.6-flash
-    effort: high
   codex:
     enabled: true
     command: codex
-    model: gpt-5.6-luna
+    model: null
     effort: high
   gemini:
     enabled: true
-    model: gemini-3.6-flash
+    model: null
     effort: high
     api_key_env: GEMINI_API_KEY
   opencode:
@@ -307,12 +251,12 @@ providers:
     effort: null
 
 runtime:
-  workdir: null          # null => temporary dir per task
+  workdir: null
   timeout: 120
   max_concurrency: 2
-  host: 127.0.0.1        # singleton daemon bind host
-  port: 6506             # singleton daemon bind port
-  idle_timeout_ms: 300000 # daemon idle-exit timeout
+  host: 127.0.0.1
+  port: 6506
+  idle_timeout_ms: 300000
 
 fallback:
   enabled: true
@@ -335,220 +279,174 @@ media:
 logging:
   level: INFO
 
-# Transparent vision proxy (lm-visual-mcp proxy)
 proxy:
   host: 127.0.0.1
   port: 8787
+  classifier:
+    disable_thinking: true
 ```
-
-### Provider order
-
-The router tries providers in order and falls back on failure. Default:
-`agy → codex → gemini → opencode`.
-
-Not fallback-eligible by default: `invalid_input`, `invalid_model`, `config_error`.
-The `fallback.on` list is the final authority.
-
-### Provider model
-
-Each provider's model is set in config and used automatically on fallback — there
-is no cross-provider model namespace to manage. Set a model to `null` to let the
-provider use its own default.
-
-```yaml
-providers:
-  agy:      { model: gemini-xxx }
-  codex:    { model: gpt-xxx }
-  gemini:   { model: gemini-xxx }
-  opencode: { model: google/gemini-xxx }
-```
-
-### Provider effort
-
-Each provider's reasoning effort is configured with `effort`
-(`low` | `medium` | `high` | `xhigh`, provider-dependent; `null` = provider default)
-and passed through at runtime:
-
-- **AGY** → `--effort`
-- **Codex** → `-c model_reasoning_effort=<effort>`
-- **Gemini** → `thinking_config` (thinking level)
-- **OpenCode** → `--variant`
-
-### Gemini API key
-
-API keys are **never** tool arguments. Resolution order:
-
-```text
-LM_VISUAL_MCP_GEMINI_API_KEY
-    > config.providers.gemini.api_key_env (the env var it names)
-    > GEMINI_API_KEY
-```
-
-For compatibility a plain `api_key` may be placed in the config file; it is stored
-as a `SecretStr`, never printed, never dumped, never returned in MCP responses, and
-never included in exceptions. Prefer the environment variable.
 
 ### Environment variables
 
 ```text
-LM_VISUAL_MCP_CONFIG                  config file path
-LM_VISUAL_MCP_WORKDIR                runtime workdir
-LM_VISUAL_MCP_TIMEOUT                runtime timeout (s)
-LM_VISUAL_MCP_MAX_CONCURRENCY        max concurrency (requests beyond this queue)
-LM_VISUAL_MCP_HOST                   daemon bind host (default 127.0.0.1)
-LM_VISUAL_MCP_PORT                   daemon bind port (default 6506)
-LM_VISUAL_MCP_IDLE_TIMEOUT_MS        daemon idle-exit timeout (default 300000)
+LM_VISUAL_MCP_CONFIG
+LM_VISUAL_MCP_WORKDIR
+LM_VISUAL_MCP_TIMEOUT
+LM_VISUAL_MCP_MAX_CONCURRENCY
+LM_VISUAL_MCP_HOST
+LM_VISUAL_MCP_PORT
+LM_VISUAL_MCP_IDLE_TIMEOUT_MS
+
 LM_VISUAL_MCP_AGY_COMMAND / _MODEL / _EFFORT
 LM_VISUAL_MCP_CODEX_COMMAND / _MODEL / _EFFORT
 LM_VISUAL_MCP_GEMINI_MODEL / _API_KEY / _EFFORT
-GEMINI_API_KEY                       gemini API key (fallback)
 LM_VISUAL_MCP_OPENCODE_COMMAND / _MODEL / _EFFORT
-LM_VISUAL_MCP_PROXY_HOST             proxy bind host (default 127.0.0.1)
-LM_VISUAL_MCP_PROXY_PORT             proxy bind port (default 8787)
-LM_VISUAL_MCP_LOG_LEVEL              ERROR | WARNING | INFO | DEBUG
+
+GEMINI_API_KEY
+LM_VISUAL_MCP_PROXY_HOST
+LM_VISUAL_MCP_PROXY_PORT
+LM_VISUAL_MCP_PROXY_CLASSIFIER_DISABLE_THINKING
+LM_VISUAL_MCP_LOG_LEVEL
 ```
 
-### Workdir
+Gemini credential resolution is: `LM_VISUAL_MCP_GEMINI_API_KEY`, then the compatibility
+plain `providers.gemini.api_key`, then the environment variable named by `api_key_env`, then
+`GEMINI_API_KEY`. Prefer `api_key_env`; a plain config key is accepted only for compatibility.
 
-With `runtime.workdir: null` (default), every task gets a brand-new temporary
-directory cleaned up on completion. With a project workdir configured, task media
-is staged under `<workdir>/.lm-visual-mcp/<uuid>/` and removed after. User files
-are never modified or deleted.
+### Workspaces and media
 
-### Media limits
+With `runtime.workdir: null`, each MCP call gets a temporary directory that is deleted after
+the call. With a configured workdir, files are staged under
+`<workdir>/.lm-visual-mcp/<uuid>/` and that task directory is removed afterward. Source files
+are copied, never modified.
 
-Images: png/jpg/jpeg/webp/gif/bmp/tiff (default `max_image_mb: 20`). Videos:
-mp4/mov/m4v (`max_video_mb: 8`). Remote downloads are bounded by timeout, size and
-a redirect limit, and validated by MIME type.
+MCP image types: PNG, JPEG, WebP, GIF, BMP, TIFF. Video file extensions accepted by the media
+layer are MP4, MOV, and M4V, but provider support is currently incomplete. `file://` URLs are
+rejected; use a local path or HTTP(S) URL.
 
----
+## MCP tools
 
-## Tools
+| Tool | Required input | Optional input | Purpose |
+|---|---|---|---|
+| `ui_to_artifact` | `image_source`, `output_type`, `prompt` | - | UI to code, prompt, spec, or description |
+| `extract_text_from_screenshot` | `image_source`, `prompt` | `programming_language` | OCR/code extraction |
+| `diagnose_error_screenshot` | `image_source`, `prompt` | `context` | Error and stack-trace diagnosis |
+| `understand_technical_diagram` | `image_source`, `prompt` | `diagram_type` | Architecture/UML/flow analysis |
+| `analyze_data_visualization` | `image_source`, `prompt` | `analysis_focus` | Chart and plot analysis |
+| `ui_diff_check` | `expected_image_source`, `actual_image_source`, `prompt` | - | Visual regression comparison |
+| `analyze_image` | `image_source`, `prompt` | - | General image analysis |
+| `analyze_video` | `video_source`, `prompt` | - | Compatibility/experimental video entry |
 
-| Tool | Purpose |
-|------|---------|
-| `ui_to_artifact` | Convert a UI screenshot into `code` / `prompt` / `spec` / `description` |
-| `extract_text_from_screenshot` | Verbatim OCR of code / terminal / config / docs |
-| `diagnose_error_screenshot` | Diagnose error / stack trace / root cause / fix |
-| `understand_technical_diagram` | Understand architecture / flowchart / UML / ER diagrams |
-| `analyze_data_visualization` | Analyze charts: trends, anomalies, comparisons |
-| `ui_diff_check` | Compare EXPECTED vs ACTUAL UI for visual regression |
-| `analyze_image` | General visual analysis |
-| `analyze_video` | Video analysis (mp4/mov/m4v) |
+Aliases: `image_analysis` → `analyze_image`; `video_analysis` → `analyze_video`.
 
-Aliases share the same implementations: `image_analysis` → `analyze_image`,
-`video_analysis` → `analyze_video`.
-
----
-
-## Structured output
-
-Every provider's result is normalized into one schema and wrapped in a standard
-envelope:
+## Response format
 
 ```json
 {
   "provider": "codex",
-  "model": "gpt-xxx",
+  "model": "configured-model",
   "result": {
-    "summary": "Short visual summary",
+    "summary": "Short summary",
     "answer": "Direct answer",
-    "observations": [{ "type": "text", "text": "...", "confidence": 0.95 }],
-    "texts": [{ "text": "visible text", "bbox": [100, 100, 900, 200], "confidence": 0.98 }],
-    "elements": [{ "label": "Build button", "type": "ui_element", "bbox": [700, 20, 820, 70], "confidence": 0.93 }],
-    "warnings": []
+    "observations": [],
+    "texts": [],
+    "elements": [],
+    "warnings": [],
+    "details": {}
   },
   "meta": {
-    "duration_ms": 4812,
+    "duration_ms": 4812.0,
     "fallbacks": [],
-    "usage": { "input_tokens": null, "output_tokens": null }
+    "usage": {}
   }
 }
 ```
 
-`bbox` is normalized to `0..1000` as `[x_min, y_min, x_max, y_max]`. When a value
-can't be determined, providers do not guess — they omit it and add a warning.
+`provider` and `model` may appear in the response for observability even though callers cannot
+select them. bbox values are intended to use `[x_min, y_min, x_max, y_max]` on a `0..1000`
+scale; strict range enforcement is not yet implemented.
 
----
+## Provider notes
 
-## Doctor
+- **AGY**: stages images in an added directory, invokes `agy` with `--sandbox`, and discovers
+  image capability from the real request. Headless image access can be non-deterministic, so
+  failures may fall back to the next provider.
+- **Codex**: uses repeated `-i`, a read-only sandbox, and `--output-schema`.
+- **Gemini**: uses `google-genai`, structured JSON, and multiple image parts.
+- **OpenCode**: uses repeated `--file` and parses the JSON event stream.
 
-```bash
-lm-visual-mcp doctor
-lm-visual-mcp doctor --probe   # also runs a real AGY vision smoke test (needs Pillow)
-lm-visual-mcp --version
-```
-
-`doctor` never prints API key contents.
-
----
-
-## Provider detection
-
-- **AGY**: `agy -p "<prompt>" --output-format json`. Images are staged into the
-  workspace media dir and referenced by bare filename. AGY ignores the shell cwd
-  and always runs its tools in its own workspace, so the media dir is registered
-  with `--add-dir` (repeatable); files in an added dir are readable natively. The
-  server launches AGY in a sandbox (`--sandbox`). There is no separate vision
-  probe — every image request is exactly one real AGY call, and vision capability
-  is discovered from that call's result and cached.
-- **Codex**: `codex exec -i <img> ... --output-schema ... -s read-only`. Images
-  passed natively; read-only sandbox enforced.
-- **Gemini**: `google-genai`, structured JSON, multi-image, configured model.
-- **OpenCode**: `opencode run --format json`, images via `--file`, JSON event
-  stream parsed for the final assistant result.
-
-> **AGY non-determinism**: AGY reads images from the dir registered with
-> `--add-dir`. As of AGY CLI 1.1.x headless mode is still non-deterministic — a run
-> may intermittently reach for a tool permission it does not hold. When that happens
-> the server detects it and transparently falls back to the next provider.
-> `lm-visual-mcp doctor --probe` reports the capability without failing the server.
-
----
+CLI version compatibility is not currently pinned; run `doctor` after upgrading a provider CLI.
 
 ## Security
 
-The server only `LOOK / READ / UNDERSTAND / COMPARE / ANALYZE` — it never
-`EDIT / BUILD / EXECUTE / MODIFY`. Codex runs in a read-only sandbox; AGY and
-OpenCode are never launched with dangerous auto-approval. API keys are redacted
-from all logs and responses.
+The safe deployment model is a trusted, single-user machine with both listeners bound to
+`127.0.0.1`.
 
-The proxy forwards API keys and bodies untouched (only hop-by-hop headers are
-stripped); it holds no account state of its own.
+- Do not expose daemon port 6506 or proxy port 8787 to a LAN or the public internet.
+- The daemon `/tool` endpoint has no authentication.
+- The proxy forwards Authorization/API-key headers to the upstream encoded in its path and can
+  fetch HTTP(S) image URLs. It does not yet enforce an upstream allowlist or block private-network
+  image targets, so an exposed proxy would create SSRF and credential-forwarding risk.
+- data URL and Anthropic base64 images do not yet receive the same complete size validation as
+  downloaded images.
+- MCP local-path tools can read paths supplied by the caller; only trusted agents should have
+  access to this server.
+- Avoid plain API keys in YAML. The code avoids intentionally logging keys, but complete
+  value-based log redaction is not implemented yet.
 
----
+The original MCP and proxy requirements remain in [`mcp_plan.md`](mcp_plan.md) and
+[`proxy_plan.md`](proxy_plan.md). Current repository-wide findings, risk levels, and remediation
+priorities are in [`code_review.md`](code_review.md); Auto classifier wire details are in
+[`classifier_compatibility.md`](classifier_compatibility.md).
+
+## Current limitations
+
+- `analyze_video`/`video_analysis` are registered, but Codex, Gemini, and OpenCode reject video;
+  AGY does not currently receive a dependable staged video reference. Treat video as unsupported.
+- Proxy endpoint query strings are dropped.
+- Proxy image parse errors fail open and forward the original image request.
+- Proxy base64/data images need unified MIME and size validation.
+- Proxy targets and remote image URLs have no configurable allowlist/private-network policy.
+- Windows `stop`/`restart` process discovery is incomplete.
+- Numeric configuration values are not yet range-validated.
+- A dependency warning about an unresolved Pydantic forward reference may appear in MCP smoke
+  tests; it does not currently fail the suite.
 
 ## Development
 
 ```bash
-python -m pytest
+.venv/bin/python -m pytest -q
 ```
 
-Tests cover config, router, workspace, media, all four providers (subprocess /
-genai mocked), Z.AI tool-schema compatibility, the proxy adapters + cache, and an
-MCP `tools/list` + `tools/call` smoke test.
+The audited baseline is 118 passing tests when the environment allows binding temporary
+loopback ports. In restricted sandboxes, socket-based daemon/proxy tests can fail with
+`PermissionError` even though non-network tests pass.
 
----
+`mcp_plan.md` and `proxy_plan.md` retain their original requirements and history. Current audit
+results are recorded in [`code_review.md`](code_review.md); completed Auto classifier work, wire
+evidence, and risk boundaries are documented in
+[`classifier_compatibility.md`](classifier_compatibility.md).
 
 ## Troubleshooting
 
-- **`agy` falls back to codex for images** — AGY reads images from the dir
-  registered with `--add-dir` (the media dir is added automatically). Headless
-  mode is non-deterministic and may intermittently auto-deny a tool permission.
-  The media dir is readable natively, so no `read_file` or `command(ls)` grant
-  is needed and `command(*)` must never be configured. When AGY still fails, the
-  server falls back transparently. Run `lm-visual-mcp doctor --probe` to exercise
-  AGY directly.
-- **Nothing responds** — no provider is `enabled`. Enable providers in config.
-- **Gemini not used** — an API key is required; see "Gemini API key".
-- **Codex blocks on stdin** — the server always closes stdin for CLI providers.
-- **stdout corruption** — all logs go to stderr; stdout is reserved for MCP.
-- **Proxy not forwarding** — confirm the base_url uses
-  `/proxy/<protocol-path>/<base64url(base API URL)>` and the singletons are up
-  (`lm-visual-mcp start` / `lm-visual-mcp doctor`).
-
----
+- **No provider succeeds**: run `lm-visual-mcp doctor`, disable unavailable providers, and check
+  CLI authentication or the Gemini key.
+- **AGY falls back unexpectedly**: run `lm-visual-mcp doctor --probe`; AGY headless image access
+  may intermittently fail.
+- **Codex blocks or cannot write**: the server closes stdin and intentionally uses a read-only
+  sandbox.
+- **MCP stdout is corrupted**: ensure wrappers and provider CLIs do not print into the MCP
+  process stdout; project logs use stderr.
+- **Proxy route returns 400/404**: verify the explicit protocol path and use unpadded base64url,
+  not standard base64 containing `/`.
+- **Proxy cannot reach upstream**: confirm the decoded base URL is complete and does not rely on
+  a query string.
+- **Auto Mode reports classifier unavailable**: verify that the request reached the Anthropic
+  proxy and check whether the upstream rejected the long system prompt, cache-control, or thinking
+  field; do not infer a network bypass from the UI message alone. If the upstream rejects disabled
+  thinking, set `LM_VISUAL_MCP_PROXY_CLASSIFIER_DISABLE_THINKING=false`; response normalization
+  remains enabled.
 
 ## License
 
-MIT
+MIT. See [`LICENSE`](LICENSE).
