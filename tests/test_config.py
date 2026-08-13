@@ -82,6 +82,13 @@ def test_environment_override(monkeypatch, tmp_path) -> None:
     assert cfg.runtime.workdir == "/tmp/wd"
 
 
+def test_classifier_thinking_disabled_by_default_and_env_override(monkeypatch) -> None:
+    assert load_config(env={}, config_path=None).proxy.classifier.disable_thinking is True
+    monkeypatch.setenv("LM_VISUAL_MCP_PROXY_CLASSIFIER_DISABLE_THINKING", "false")
+    cfg = load_config(env=None, config_path=None)
+    assert cfg.proxy.classifier.disable_thinking is False
+
+
 def test_cli_override_log_level(tmp_path) -> None:
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text("logging:\n  level: INFO\n", encoding="utf-8")

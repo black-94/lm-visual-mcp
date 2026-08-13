@@ -105,11 +105,20 @@ class LoggingConfig(pd.BaseModel):
     level: str = "INFO"
 
 
+class ClassifierProxyConfig(pd.BaseModel):
+    """Claude Code Auto-mode classifier compatibility settings."""
+
+    # Classifier output is a tiny XML verdict. Thinking blocks waste tokens and
+    # break some Claude Code parsers when returned before the text block.
+    disable_thinking: bool = True
+
+
 class ProxyConfig(pd.BaseModel):
     """Transparent vision-proxy HTTP listener configuration."""
 
     host: str = "127.0.0.1"
     port: int = 8787
+    classifier: ClassifierProxyConfig = pd.Field(default_factory=ClassifierProxyConfig)
 
 
 class AppConfig(pd.BaseModel):
@@ -258,6 +267,19 @@ class ConfigLoader:
             proxy["host"] = e("PROXY_HOST")
         if e("PROXY_PORT"):
             proxy["port"] = int(e("PROXY_PORT"))
+        if e("PROXY_CLASSIFIER_DISABLE_THINKING"):
+            proxy.setdefault("classifier", {})["disable_thinking"] = _parse_bool(
+                e("PROXY_CLASSIFIER_DISABLE_THINKING")
+            )
+
+
+def _parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"invalid boolean environment value: {value!r}")
 
 
 def load_config(

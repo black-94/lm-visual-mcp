@@ -72,3 +72,7 @@ logging:
 proxy:
   host: 127.0.0.1
   port: 8787
+  classifier:
+    # Claude Code Auto classifier needs only a short XML verdict. Disable
+    # reasoning by default; set false for models that reject type=disabled.
+    disable_thinking: true

@@ -151,6 +151,157 @@ def test_normalize_preserves_unknown_keys():
     assert r.summary == "s"
 
 
+# -- Claude Code Auto classifier compatibility -----------------------------
+def _classifier_body() -> bytes:
+    return json.dumps({
+        "model": "gateway-model-alias",
+        "max_tokens": 2112,
+        "stop_sequences": ["</block>"],
+        "system": [
+            {"type": "text", "text": "billing metadata"},
+            {"type": "text", "text": (
+                "You are a security monitor for autonomous AI coding agents.\n"
+                "Return <block>yes</block> or <block>no</block>."
+            ), "cache_control": {"type": "ephemeral"}},
+        ],
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "<transcript>...action...</transcript>"},
+        ]}],
+    }).encode()
+
+
+def test_detects_classifier_by_contract_not_model_or_token_count():
+    from lm_visual_mcp.proxy.classifier import (
+        is_auto_classifier_request,
+        is_auto_classifier_stage1_request,
+    )
+
+    assert is_auto_classifier_request(_classifier_body()) is True
+    assert is_auto_classifier_stage1_request(_classifier_body()) is True
+    ordinary = json.dumps({
+        "model": "claude-sonnet-5",
+        "max_tokens": 64,
+        "system": "ordinary prompt",
+        "messages": [],
+    }).encode()
+    assert is_auto_classifier_request(ordinary) is False
+
+
+def test_classifier_family_detection_does_not_require_stage_one_stop_sequence():
+    from lm_visual_mcp.proxy.classifier import (
+        is_auto_classifier_request,
+        is_auto_classifier_stage1_request,
+    )
+
+    request = json.loads(_classifier_body())
+    request["stop_sequences"] = ["</severity>"]
+    body = json.dumps(request).encode()
+    assert is_auto_classifier_request(body) is True
+    assert is_auto_classifier_stage1_request(body) is False
+
+
+def test_classifier_response_restores_anthropic_stop_sequence():
+    from lm_visual_mcp.proxy.classifier import normalize_auto_classifier_response
+
+    upstream = json.dumps({
+        "id": "msg_gateway",
+        "type": "message",
+        "role": "assistant",
+        "model": "actual-gateway-model",
+        "content": [
+            {"type": "thinking", "thinking": "analysis that must not lead content"},
+            {"type": "text", "text": "<block>no</block>"},
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 10, "output_tokens": 4},
+    }).encode()
+    body, changed = normalize_auto_classifier_response(upstream)
+    assert changed is True
+    result = json.loads(body)
+    assert result["content"] == [{"type": "text", "text": "<block>no"}]
+    assert result["stop_reason"] == "stop_sequence"
+    assert result["stop_sequence"] == "</block>"
+    assert result["usage"] == {"input_tokens": 10, "output_tokens": 4}
+
+
+def test_classifier_yes_response_is_binary_stage_one_verdict():
+    from lm_visual_mcp.proxy.classifier import normalize_auto_classifier_response
+
+    upstream = json.dumps({
+        "type": "message",
+        "content": [{
+            "type": "text",
+            "text": (
+                "analysis before verdict <block>yes</block>"
+                "<category>Data Exfiltration</category>"
+                "<reason>[Data Exfiltration] sends credentials</reason>"
+            ),
+        }],
+        "stop_reason": "end_turn",
+    }).encode()
+    body, changed = normalize_auto_classifier_response(upstream)
+    assert changed is True
+    result = json.loads(body)
+    # Stage one requested </block> as a stop sequence, so the normalized wire
+    # result contains only the preliminary binary verdict. Claude Code decides
+    # whether a second classifier stage is needed.
+    assert result["content"] == [{"type": "text", "text": "<block>yes"}]
+    assert result["stop_reason"] == "stop_sequence"
+
+
+def test_classifier_request_disables_thinking():
+    from lm_visual_mcp.proxy.classifier import disable_auto_classifier_thinking
+
+    body, changed = disable_auto_classifier_thinking(_classifier_body())
+    assert changed is True
+    assert json.loads(body)["thinking"] == {"type": "disabled"}
+    body_again, changed_again = disable_auto_classifier_thinking(body)
+    assert changed_again is False
+    assert body_again == body
+
+
+def test_classifier_response_without_verdict_is_not_rewritten():
+    from lm_visual_mcp.proxy.classifier import normalize_auto_classifier_response
+
+    upstream = json.dumps({
+        "type": "message",
+        "content": [{"type": "text", "text": "I cannot decide"}],
+    }).encode()
+    body, changed = normalize_auto_classifier_response(upstream)
+    assert changed is False
+    assert body == upstream
+
+
+def test_classifier_response_with_conflicting_verdicts_is_not_rewritten():
+    from lm_visual_mcp.proxy.classifier import normalize_auto_classifier_response
+
+    upstream = json.dumps({
+        "type": "message",
+        "content": [{"type": "text", "text": "<block>yes</block> <block>no</block>"}],
+    }).encode()
+    body, changed = normalize_auto_classifier_response(upstream)
+    assert changed is False
+    assert body == upstream
+
+
+def test_classifier_response_accepts_already_truncated_verdict():
+    from lm_visual_mcp.proxy.classifier import normalize_auto_classifier_response
+
+    upstream = json.dumps({
+        "type": "message",
+        "content": [{"type": "text", "text": "<block>no"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+    }).encode()
+    body, changed = normalize_auto_classifier_response(upstream)
+    assert changed is True
+    result = json.loads(body)
+    assert result["content"] == [{"type": "text", "text": "<block>no"}]
+    assert result["stop_reason"] == "stop_sequence"
+    assert result["stop_sequence"] == "</block>"
+
+
 # -- server integration -----------------------------------------------------
 @pytest.mark.asyncio
 async def test_transparent_path_does_not_describe(unused_tcp_port):
@@ -306,6 +457,113 @@ async def test_end_to_end_with_sdk_suffix(unused_tcp_port):
         assert resp.status == 200
         await resp.read()
         assert json.loads(captured["body"]) == {"messages": [{"role": "user", "content": "hi"}]}
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
+@pytest.mark.asyncio
+async def test_classifier_response_is_normalized_end_to_end(unused_tcp_port):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    captured = {}
+
+    async def origin_h(request):
+        captured["body"] = await request.read()
+        return web.json_response({
+            "id": "msg_gateway",
+            "type": "message",
+            "role": "assistant",
+            "model": "gateway-backend-model",
+            "content": [
+                {"type": "thinking", "thinking": "benign"},
+                {"type": "text", "text": "<block>no</block>"},
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        })
+
+    origin = web.Application()
+    origin.router.add_post("/v1/messages", origin_h)
+    origin_server = TestServer(origin, port=unused_tcp_port)
+    await origin_server.start_server()
+
+    target = f"http://127.0.0.1:{origin_server.port}"
+    proxy = _app(FakeRouter([]))
+    client = TestClient(TestServer(proxy.build()))
+    await client.start_server()
+    try:
+        request_body = _classifier_body()
+        resp = await client.post(
+            f"/proxy/anthropic/{_b64(target)}/v1/messages",
+            data=request_body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 200
+        result = await resp.json()
+        upstream_request = json.loads(captured["body"])
+        assert upstream_request["thinking"] == {"type": "disabled"}
+        # All classifier semantics other than the configured thinking override
+        # remain intact.
+        original_request = json.loads(request_body)
+        upstream_request.pop("thinking")
+        assert upstream_request == original_request
+        assert result["content"] == [{"type": "text", "text": "<block>no"}]
+        assert result["stop_reason"] == "stop_sequence"
+        assert result["stop_sequence"] == "</block>"
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
+@pytest.mark.asyncio
+async def test_classifier_thinking_rewrite_can_be_disabled_without_disabling_response_normalization(
+    unused_tcp_port,
+):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    captured = {}
+
+    async def origin_h(request):
+        captured["body"] = await request.read()
+        return web.json_response({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "gateway reasoning"},
+                {"type": "text", "text": "<block>no</block>"},
+            ],
+            "stop_reason": "end_turn",
+        })
+
+    origin = web.Application()
+    origin.router.add_post("/v1/messages", origin_h)
+    origin_server = TestServer(origin, port=unused_tcp_port)
+    await origin_server.start_server()
+
+    cfg = AppConfig()
+    cfg.proxy.classifier.disable_thinking = False
+    target = f"http://127.0.0.1:{origin_server.port}"
+    from lm_visual_mcp.proxy.server import VisionProxyApp
+
+    proxy = VisionProxyApp(cfg, router=FakeRouter([]))
+    client = TestClient(TestServer(proxy.build()))
+    await client.start_server()
+    try:
+        request_body = _classifier_body()
+        resp = await client.post(
+            f"/proxy/anthropic/{_b64(target)}/v1/messages",
+            data=request_body,
+            headers={"Content-Type": "application/json"},
+        )
+        result = await resp.json()
+        assert captured["body"] == request_body  # request rewrite is disabled
+        assert result["content"] == [{"type": "text", "text": "<block>no"}]
+        assert result["stop_reason"] == "stop_sequence"
+        assert result["stop_sequence"] == "</block>"
     finally:
         await client.close()
         await origin_server.close()

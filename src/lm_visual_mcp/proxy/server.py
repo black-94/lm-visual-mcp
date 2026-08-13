@@ -3,7 +3,8 @@
 Transparent forwarder + image preprocessor. No image -> byte-level passthrough
 (only hop-by-hop headers stripped, API keys and bodies untouched). Image present
 -> describe once (per-image SHA-256 cache) and rewrite the image parts into
-text. The response (including SSE) is always piped back untouched.
+text. Responses (including SSE) are piped back untouched except for the known
+Claude Code Auto classifier stage-one compatibility normalization.
 """
 
 from __future__ import annotations
@@ -23,6 +24,12 @@ from ..providers import build_registry
 from ..router import ProviderRouter
 from ..services.media import MediaService
 from .cache import VisionCache
+from .classifier import (
+    disable_auto_classifier_thinking,
+    is_auto_classifier_request,
+    is_auto_classifier_stage1_request,
+    normalize_auto_classifier_response,
+)
 from .describe import describe
 from .detect import build_registry as build_adapter_registry
 from .types import ImageSlot, serialize
@@ -110,21 +117,49 @@ class VisionProxyApp:
         proto, target, suffix = self._parse_target(request.path)
         adapter = self._adapters.get(proto)
         body = await request.read()
+        classifier_request = proto == "anthropic" and is_auto_classifier_request(body)
+        classifier_stage1 = classifier_request and is_auto_classifier_stage1_request(body)
+        if classifier_request and self.cfg.proxy.classifier.disable_thinking:
+            body, _ = disable_auto_classifier_thinking(body)
         if adapter is None or not adapter.has_image(body):
-            return await self._forward(request, target, suffix, body)
+            return await self._forward(
+                request,
+                target,
+                suffix,
+                body,
+                classifier_stage1,
+            )
 
         try:
             extracted = adapter.extract(body, self.media)
         except Exception as exc:  # noqa: BLE001 - fall back to transparent
             logger.warning("proxy parse failed for %s; forwarding raw: %s", proto, exc)
-            return await self._forward(request, target, suffix, body)
+            return await self._forward(
+                request,
+                target,
+                suffix,
+                body,
+                classifier_stage1,
+            )
         if not extracted.slots:
-            return await self._forward(request, target, suffix, body)
+            return await self._forward(
+                request,
+                target,
+                suffix,
+                body,
+                classifier_stage1,
+            )
 
         descs = await self._describe_cached(extracted.slots)
         for slot, desc in zip(extracted.slots, descs):
             slot.apply(desc)
-        return await self._forward(request, target, suffix, serialize(extracted.doc))
+        return await self._forward(
+            request,
+            target,
+            suffix,
+            serialize(extracted.doc),
+            classifier_stage1,
+        )
 
     def _parse_target(self, path: str) -> tuple[str, str, str]:
         """Return ``(protocol_path, target_url, suffix_path)`` from ``/proxy/<proto>/<b64>...``.
@@ -197,7 +232,14 @@ class VisionProxyApp:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    async def _forward(self, request: web.Request, target: str, suffix: str, body: bytes) -> web.StreamResponse:
+    async def _forward(
+        self,
+        request: web.Request,
+        target: str,
+        suffix: str,
+        body: bytes,
+        normalize_classifier_stage1: bool,
+    ) -> web.StreamResponse:
         session = await self._get_session()
         url = target if not suffix else target.rstrip("/") + suffix
         out_headers = _passthrough_headers(request.headers)
@@ -206,6 +248,23 @@ class VisionProxyApp:
         async with session.request(request.method, url, headers=out_headers, data=body) as resp:
             resp_headers = _passthrough_headers(resp.headers)
             resp_headers.pop("Content-Length", None)  # streamed; aiohttp frames it
+            if (
+                normalize_classifier_stage1
+                and resp.status == 200
+                and "json" in (resp.headers.get("Content-Type") or "").lower()
+            ):
+                upstream_body = await resp.read()
+                rewritten_body, changed = normalize_auto_classifier_response(upstream_body)
+                if changed:
+                    # The payload is now decoded and rewritten, so validators
+                    # and encodings tied to the upstream bytes no longer apply.
+                    for header in ("Content-Encoding", "Content-MD5", "ETag"):
+                        resp_headers.pop(header, None)
+                return web.Response(
+                    status=resp.status,
+                    headers=resp_headers,
+                    body=rewritten_body,
+                )
             stream = web.StreamResponse(status=resp.status, headers=resp_headers)
             await stream.prepare(request)
             async for chunk in resp.content.iter_any():
