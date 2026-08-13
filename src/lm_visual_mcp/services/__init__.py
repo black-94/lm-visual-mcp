@@ -5,7 +5,13 @@ from .media import MediaService, ResolvedMedia
 from .subprocess_runner import SubprocessRunner, SubprocessInvocation
 from .json_output import extract_json, JsonExtractionError
 from .control import ToolServer, run_daemon, default_pidfile
-from .proxy import ProxyVisionSession, probe_primary, start_primary
+from .proxy import (
+    ProxyVisionSession,
+    probe_primary,
+    probe_proxy,
+    start_primary,
+    start_proxy,
+)
 
 __all__ = [
     "WorkspaceManager",
@@ -21,5 +27,7 @@ __all__ = [
     "default_pidfile",
     "ProxyVisionSession",
     "probe_primary",
+    "probe_proxy",
     "start_primary",
+    "start_proxy",
 ]

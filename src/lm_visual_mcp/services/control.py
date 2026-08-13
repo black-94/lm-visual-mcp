@@ -35,10 +35,39 @@ logger = logging.getLogger("lm_visual_mcp.control")
 
 #: Where the daemon writes its PID (used for diagnosis / cleanup).
 DEFAULT_PIDFILE = Path("~/.cache/lm-visual-mcp/lm-visual-mcp.pid").expanduser()
+#: Where the vision proxy writes its PID.
+PROXY_PIDFILE = Path("~/.cache/lm-visual-mcp/lm-visual-mcp-proxy.pid").expanduser()
 
 
 def default_pidfile() -> Path:
     return DEFAULT_PIDFILE
+
+
+def proxy_pidfile() -> Path:
+    return PROXY_PIDFILE
+
+
+def write_pidfile(pidfile: Path) -> None:
+    """Best-effort write ``os.getpid()`` to ``pidfile``."""
+    try:
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(str(os.getpid()))
+    except OSError:
+        pass
+
+
+def read_pidfile(pidfile: Path) -> Optional[int]:
+    try:
+        return int(pidfile.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def unlink_pidfile(pidfile: Path) -> None:
+    try:
+        pidfile.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def daemonize(pidfile: Path) -> None:
@@ -101,9 +130,9 @@ class _Handler(BaseHTTPRequestHandler):
         ts = self._tool_server()
         if self.path == "/health":
             ts.touch()
-            # Deferred import: server -> tools -> services -> control would be
-            # a cycle at module load time.
-            from ..server import _TOOL_NAMES
+            # Import-light: tool_names carries no heavy deps, so a cold-start
+            # probe answers instantly instead of stalling on the server stack.
+            from ..tool_names import _TOOL_NAMES
 
             self._json(
                 200,
@@ -172,6 +201,13 @@ class ToolServer:
     # -- lifecycle ---------------------------------------------------------
     @property
     def session(self) -> VisionSession:
+        """The shared VisionSession; blocks until the loop thread has built it.
+
+        ``/health`` never touches this, so a cold-start probe answers instantly
+        while the heavy session import (providers, aiohttp, Pillow) is still
+        running in the loop thread. Only ``/tool`` waits on it.
+        """
+        self._ready.wait()
         assert self._session is not None
         return self._session
 
@@ -186,9 +222,10 @@ class ToolServer:
     def serve(self) -> None:
         assert self._server is not None
         threading.Thread(target=self._loop_main, name="daemon-loop", daemon=True).start()
-        self._ready.wait()  # VisionSession exists (semaphore bound to our loop)
         if self.idle_timeout_ms > 0:
             threading.Thread(target=self._reaper, name="daemon-reaper", daemon=True).start()
+        # Serve immediately; the session is built concurrently in the loop
+        # thread and /tool handlers wait for it via the ``session`` property.
         try:
             self._server.serve_forever()
         finally:

@@ -37,6 +37,53 @@ def probe_primary(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def probe_proxy(host: str, port: int, timeout: float = 1.0) -> bool:
+    """Return True if a healthy vision proxy answers on host:port."""
+    req = urllib.request.Request(f"http://{host}:{port}/health", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+            return isinstance(data, dict) and data.get("ok") is True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def start_proxy(
+    cfg: AppConfig,
+    config_path: Optional[str],
+    max_wait: float = 6.0,
+) -> bool:
+    """Spawn the vision proxy (``--proxy``) and wait until it answers /health.
+
+    The proxy re-resolves its own config via the same priority (file/env/CLI)
+    given ``config_path``. Safe under concurrency: only one spawned proxy can
+    bind the port; the others exit quietly and every caller connects to the
+    winner.
+    """
+    host, port = cfg.proxy.host, cfg.proxy.port
+    cmd = [sys.executable, "-m", "lm_visual_mcp", "proxy"]
+    if config_path:
+        cmd += ["--config", config_path]
+    try:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # survive the spawning client's exit
+        )
+    except OSError as exc:
+        logger.warning("failed to start vision proxy: %s", exc)
+        return False
+
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        if probe_proxy(host, port, 0.5):
+            return True
+        time.sleep(0.1)
+    return probe_proxy(host, port, 0.5)
+
+
 def start_primary(
     cfg: AppConfig,
     config_path: Optional[str],

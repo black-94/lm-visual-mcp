@@ -106,6 +106,13 @@ class LoggingConfig(pd.BaseModel):
     level: str = "INFO"
 
 
+class ProxyConfig(pd.BaseModel):
+    """Transparent vision-proxy HTTP listener configuration."""
+
+    host: str = "127.0.0.1"
+    port: int = 8787
+
+
 class AppConfig(pd.BaseModel):
     version: int = CONFIG_VERSION
     providers: ProvidersConfig = pd.Field(default_factory=ProvidersConfig)
@@ -113,6 +120,7 @@ class AppConfig(pd.BaseModel):
     fallback: FallbackConfig = pd.Field(default_factory=FallbackConfig)
     media: MediaConfig = pd.Field(default_factory=MediaConfig)
     logging: LoggingConfig = pd.Field(default_factory=LoggingConfig)
+    proxy: ProxyConfig = pd.Field(default_factory=ProxyConfig)
 
     def validate_all(self) -> None:
         known = set(self.providers.names())
@@ -236,6 +244,12 @@ class ConfigLoader:
 
         if e("LOG_LEVEL"):
             data.setdefault("logging", {})["level"] = e("LOG_LEVEL")
+
+        proxy = data.setdefault("proxy", {})
+        if e("PROXY_HOST"):
+            proxy["host"] = e("PROXY_HOST")
+        if e("PROXY_PORT"):
+            proxy["port"] = int(e("PROXY_PORT"))
 
 
 def load_config(

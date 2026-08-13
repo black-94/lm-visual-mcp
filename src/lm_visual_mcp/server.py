@@ -13,22 +13,10 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from .config import AppConfig
+from .tool_names import _TOOL_NAMES
 from .tools import VisionSession
 
 logger = logging.getLogger("lm_visual_mcp.server")
-
-_TOOL_NAMES = (
-    "ui_to_artifact",
-    "extract_text_from_screenshot",
-    "diagnose_error_screenshot",
-    "understand_technical_diagram",
-    "analyze_data_visualization",
-    "ui_diff_check",
-    "analyze_image",
-    "analyze_video",
-    "image_analysis",
-    "video_analysis",
-)
 
 
 def build_server(cfg: AppConfig, session: Optional[VisionSession] = None) -> FastMCP:

@@ -67,6 +67,19 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Run a real AGY vision smoke test (requires Pillow + agy)")
     daemon = sub.add_parser("daemon", help="Run as the shared single-instance daemon")
     _add_common_args(daemon, suppress_default=True)
+    proxy = sub.add_parser("proxy", help="Run the transparent vision proxy (HTTP)")
+    _add_common_args(proxy, suppress_default=True)
+    proxy.add_argument("--host", help="Listen host (overrides config / env)")
+    proxy.add_argument("--port", type=int, help="Listen port (overrides config / env)")
+    for action, help_text in (
+        ("start", "Ensure the daemon and proxy singletons are running"),
+        ("stop", "Stop the daemon and proxy singletons"),
+        ("restart", "Restart the daemon and proxy singletons"),
+    ):
+        p = sub.add_parser(action, help=help_text)
+        _add_common_args(p, suppress_default=True)
+        p.add_argument("--service", choices=["daemon", "proxy"],
+                       help="Target only this service (default: both)")
     return parser
 
 
@@ -77,7 +90,13 @@ def _serve(cfg, config_path: Optional[str]) -> int:
     forwarded over loopback HTTP to the one global daemon.
     """
     from .server import build_server
-    from .services import ProxyVisionSession, probe_primary, start_primary
+    from .services import (
+        ProxyVisionSession,
+        probe_primary,
+        probe_proxy,
+        start_primary,
+        start_proxy,
+    )
 
     host, port = cfg.runtime.host, cfg.runtime.port
     if not probe_primary(host, port):
@@ -86,6 +105,16 @@ def _serve(cfg, config_path: Optional[str]) -> int:
             if not probe_primary(host, port):
                 logger.error("could not start shared daemon on %s:%s", host, port)
                 return 1
+
+    # Ensure the transparent vision proxy is up too (singleton). It serves the
+    # agent's text-model client; MCP vision tools still go through the daemon,
+    # so a proxy startup failure is logged but does not block serving.
+    phost, pport = cfg.proxy.host, cfg.proxy.port
+    if not probe_proxy(phost, pport):
+        logger.info("no vision proxy on %s:%s; starting one", phost, pport)
+        if not start_proxy(cfg, config_path):
+            if not probe_proxy(phost, pport):
+                logger.error("could not start vision proxy on %s:%s", phost, pport)
 
     session = ProxyVisionSession(cfg, host, port, config_path=config_path)
     mcp = build_server(cfg, session=session)
@@ -133,6 +162,36 @@ def doctor(cfg, *, probe: bool = False) -> int:
     print(f"  enabled: {cfg.fallback.enabled}")
     print("  on: " + ", ".join(r.value for r in cfg.fallback.reasons()))
     return 0
+
+
+def _lifecycle(cfg, args) -> int:
+    """``start`` / ``stop`` / ``restart`` the daemon and proxy singletons."""
+    from .services.lifecycle import SERVICES, service_targets, start_service, stop_service
+
+    names = [args.service] if args.service else list(SERVICES)
+    if args.command in ("stop", "restart"):
+        for name in reversed(names):  # proxy first, then daemon
+            _, port, pidfile = service_targets(cfg, name)
+            _report(stop_service(name, port, pidfile))
+    if args.command in ("start", "restart"):
+        for name in names:
+            _report(start_service(cfg, name, args.config))
+    return 0
+
+
+def _report(res: dict) -> None:
+    line = f"{res['service']}: {res['status']}"
+    if res.get("port"):
+        line += f" (:{res['port']})"
+    print(line)
+
+
+def _apply_proxy_overrides(cfg, args) -> None:
+    """Apply ``lm-visual-mcp proxy --host/--port`` over the loaded config."""
+    if args.host:
+        cfg.proxy.host = args.host
+    if args.port:
+        cfg.proxy.port = args.port
 
 
 def _which(command: Optional[str]):
@@ -212,6 +271,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         from .services import run_daemon
 
         return run_daemon(cfg)
+
+    if args.command == "proxy":
+        _apply_proxy_overrides(cfg, args)
+        from .proxy import run_proxy
+
+        return run_proxy(cfg)
+
+    if args.command in ("start", "stop", "restart"):
+        return _lifecycle(cfg, args)
 
     return _serve(cfg, args.config)
 

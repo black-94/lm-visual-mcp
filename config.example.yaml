@@ -66,3 +66,9 @@ media:
 
 logging:
   level: INFO
+
+# Transparent vision proxy (lm-visual-mcp proxy). No image -> byte-level
+# passthrough; image present -> describe via the providers above and rewrite.
+proxy:
+  host: 127.0.0.1
+  port: 8787

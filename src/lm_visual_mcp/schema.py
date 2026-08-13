@@ -142,17 +142,22 @@ def _make_strict(node):
 def normalize_result(raw: dict) -> VisionResult:
     """Coerce arbitrary provider JSON into a :class:`VisionResult`.
 
-    Unknown keys are preserved into ``details``. Malformed fields degrade
-    gracefully instead of raising, matching the "don't guess, warn" policy.
+    Unknown top-level keys (e.g. a describe request's per-image ``images`` array)
+    are preserved into ``details`` on both the success and failure paths.
+    Malformed fields degrade gracefully instead of raising, matching the "don't
+    guess, warn" policy.
     """
     warnings: list[str] = list(raw.get("warnings") or [])
     try:
-        return VisionResult.model_validate(raw)
+        result = VisionResult.model_validate(raw)
     except Exception as exc:  # noqa: BLE001 - normalize must not raise
         warnings.append(f"result normalization warning: {exc}")
-        return VisionResult(
+        result = VisionResult(
             summary=str(raw.get("summary", "")),
             answer=str(raw.get("answer", raw.get("answer") or raw.get("summary", ""))),
             warnings=warnings,
-            details=raw,
         )
+    extras = {k: v for k, v in raw.items() if k not in VisionResult.model_fields}
+    if extras:
+        result.details = {**(result.details or {}), **extras}
+    return result
