@@ -569,6 +569,297 @@ async def test_classifier_thinking_rewrite_can_be_disabled_without_disabling_res
         await origin_server.close()
 
 
+# -- classifier response encoding branches (gzip/deflate transparency) -------
+class _FakeStream:
+    def __init__(self, body):
+        self._body = body
+
+    async def read(self):
+        return self._body
+
+
+class _FakeResp:
+    """Minimal stand-in for aiohttp.ClientResponse in _read_decompressed."""
+
+    def __init__(self, body, encoding=None):
+        self.content = _FakeStream(body)
+        self.headers = {} if encoding is None else {"Content-Encoding": encoding}
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_read_decompressed_passthrough_when_no_encoding():
+    from lm_visual_mcp.proxy.server import _read_decompressed
+
+    raw = b'{"plain": true}'
+    assert _run(_read_decompressed(_FakeResp(raw))) == raw
+
+
+def test_read_decompressed_unknown_encoding_returns_raw():
+    from lm_visual_mcp.proxy.server import _read_decompressed
+
+    raw = b"\x00\xff not gzip"
+    assert _run(_read_decompressed(_FakeResp(raw, "zstd"))) == raw
+
+
+def test_read_decompressed_gzip():
+    import gzip
+
+    from lm_visual_mcp.proxy.server import _read_decompressed
+
+    plain = b'{"type":"message"}'
+    assert _run(_read_decompressed(_FakeResp(gzip.compress(plain), "gzip"))) == plain
+
+
+def test_read_decompressed_zlib_deflate():
+    import zlib
+
+    from lm_visual_mcp.proxy.server import _read_decompressed
+
+    plain = b'{"type":"message"}'
+    assert _run(_read_decompressed(_FakeResp(zlib.compress(plain), "deflate"))) == plain
+
+
+def test_read_decompressed_raw_deflate():
+    import zlib
+
+    from lm_visual_mcp.proxy.server import _read_decompressed
+
+    # Some servers emit raw deflate (no zlib header); fall back to -MAX_WBITS.
+    plain = b'{"type":"message"}'
+    raw = zlib.compress(plain, 6, -zlib.MAX_WBITS)
+    assert _run(_read_decompressed(_FakeResp(raw, "deflate"))) == plain
+
+
+def test_read_decompressed_brotli():
+    try:
+        import brotli
+    except ImportError:
+        pytest.skip("brotli not installed")
+    from lm_visual_mcp.proxy.server import _read_decompressed
+
+    plain = b'{"type":"message"}'
+    assert _run(_read_decompressed(_FakeResp(brotli.compress(plain), "br"))) == plain
+
+
+def test_read_decompressed_brotli_unavailable_returns_raw():
+    try:
+        import brotli  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        pytest.skip("brotli installed")
+    from lm_visual_mcp.proxy.server import _read_decompressed
+
+    raw = b"\x21\x1b br bytes"
+    assert _run(_read_decompressed(_FakeResp(raw, "br"))) == raw
+
+
+def _classifier_origin(encoding, payload, raw_body=None):
+    """Build an aiohttp handler returning a classifier response, optionally encoded."""
+    from aiohttp import web
+
+    async def origin_h(request):
+        body = raw_body if raw_body is not None else json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if encoding == "gzip":
+            import gzip
+
+            body = gzip.compress(body)
+            headers["Content-Encoding"] = "gzip"
+        elif encoding == "deflate":
+            import zlib
+
+            body = zlib.compress(body)
+            headers["Content-Encoding"] = "deflate"
+        return web.Response(status=200, body=body, headers=headers)
+
+    return origin_h
+
+
+async def _classifier_client(origin_h, unused_tcp_port):
+    """Start origin + proxy, return (TestClient, target_url, origin_server)."""
+    import aiohttp
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    origin = web.Application()
+    origin.router.add_post("/v1/messages", origin_h)
+    origin_server = TestServer(origin, port=unused_tcp_port)
+    await origin_server.start_server()
+    client = TestClient(TestServer(_app(FakeRouter([])).build()))
+    await client.start_server()
+    target = f"http://127.0.0.1:{origin_server.port}"
+    return client, target, origin_server
+
+
+async def _classifier_raw_response(client, target, request_body=_classifier_body()):
+    """POST through the proxy with a non-decompressing client; return (resp, raw_bytes)."""
+    import aiohttp
+
+    url = f"http://127.0.0.1:{client.server.port}/proxy/anthropic/{_b64(target)}/v1/messages"
+    async with aiohttp.ClientSession(auto_decompress=False) as s:
+        async with s.post(
+            url, data=request_body, headers={"Content-Type": "application/json"}
+        ) as r:
+            return r, await r.content.read()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", None])
+async def test_classifier_encoded_upstream_is_decompressed_and_normalized(
+    unused_tcp_port, encoding
+):
+    payload = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "<block>yes</block>"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+    }
+    client, target, origin_server = await _classifier_client(
+        _classifier_origin(encoding, payload), unused_tcp_port
+    )
+    try:
+        resp, body_raw = await _classifier_raw_response(client, target)
+        assert resp.status == 200
+        assert resp.headers.get("Content-Encoding") is None
+        assert body_raw[:2] != b"\x1f\x8b"  # plaintext, not compressed
+        result = json.loads(body_raw)
+        assert result["content"] == [{"type": "text", "text": "<block>yes"}]
+        assert result["stop_reason"] == "stop_sequence"
+        assert result["stop_sequence"] == "</block>"
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
+@pytest.mark.asyncio
+async def test_classifier_gzip_no_verdict_decompressed_but_not_normalized(unused_tcp_port):
+    payload = {
+        "type": "message",
+        "content": [{"type": "text", "text": "I cannot decide"}],
+        "stop_reason": "end_turn",
+    }
+    client, target, origin_server = await _classifier_client(
+        _classifier_origin("gzip", payload), unused_tcp_port
+    )
+    try:
+        resp, body_raw = await _classifier_raw_response(client, target)
+        assert resp.headers.get("Content-Encoding") is None
+        result = json.loads(body_raw)
+        # No unambiguous verdict -> body passes through, but still decompressed
+        # and the stale Content-Encoding header is gone.
+        assert result["content"] == [{"type": "text", "text": "I cannot decide"}]
+        assert result["stop_reason"] == "end_turn"
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
+@pytest.mark.asyncio
+async def test_classifier_gzip_conflicting_verdicts_not_rewritten(unused_tcp_port):
+    payload = {
+        "type": "message",
+        "content": [
+            {"type": "text", "text": "<block>yes</block> <block>no</block>"}
+        ],
+        "stop_reason": "end_turn",
+    }
+    client, target, origin_server = await _classifier_client(
+        _classifier_origin("gzip", payload), unused_tcp_port
+    )
+    try:
+        resp, body_raw = await _classifier_raw_response(client, target)
+        assert resp.headers.get("Content-Encoding") is None
+        result = json.loads(body_raw)
+        assert result["content"][0]["text"] == "<block>yes</block> <block>no</block>"
+        assert result["stop_reason"] == "end_turn"
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
+@pytest.mark.asyncio
+async def test_classifier_gzip_malformed_json_decompressed_not_rewritten(unused_tcp_port):
+    # Non-JSON body: normalize_auto_classifier_response leaves it alone, but the
+    # proxy must still decompress and drop the stale Content-Encoding header so
+    # the client receives plaintext with matching headers.
+    client, target, origin_server = await _classifier_client(
+        _classifier_origin("gzip", None, raw_body=b"<html>not json</html>"),
+        unused_tcp_port,
+    )
+    try:
+        resp, body_raw = await _classifier_raw_response(client, target)
+        assert resp.headers.get("Content-Encoding") is None
+        assert body_raw == b"<html>not json</html>"
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
+@pytest.mark.asyncio
+async def test_classifier_non_stage1_is_transparent_passthrough(unused_tcp_port):
+    # A classifier-family request with a non-binary stop sequence is NOT stage
+    # one, so it takes the streaming path: raw bytes + Content-Encoding preserved.
+    payload = {"type": "message", "content": [{"type": "text", "text": "anything"}]}
+    client, target, origin_server = await _classifier_client(
+        _classifier_origin("gzip", payload), unused_tcp_port
+    )
+    try:
+        request_body = json.loads(_classifier_body())
+        request_body["stop_sequences"] = ["</severity>"]
+        resp, body_raw = await _classifier_raw_response(
+            client, target, request_body=json.dumps(request_body).encode()
+        )
+        assert resp.headers.get("Content-Encoding") == "gzip"
+        assert body_raw[:2] == b"\x1f\x8b"  # raw gzip forwarded untouched
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_gzip_passthrough_preserves_encoding(unused_tcp_port):
+    # Non-classifier request: byte-level transparency keeps gzip end to end.
+    import gzip
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def origin_h(request):
+        import gzip
+
+        return web.Response(
+            body=gzip.compress(b"hello world"),
+            headers={"Content-Encoding": "gzip", "Content-Type": "text/plain"},
+        )
+
+    origin = web.Application()
+    origin.router.add_post("/v1/messages", origin_h)
+    origin_server = TestServer(origin, port=unused_tcp_port)
+    await origin_server.start_server()
+    client = TestClient(TestServer(_app(FakeRouter([])).build()))
+    await client.start_server()
+    try:
+        target = f"http://127.0.0.1:{origin_server.port}"
+        url = f"http://127.0.0.1:{client.server.port}/proxy/anthropic/{_b64(target)}/v1/messages"
+        import aiohttp
+
+        async with aiohttp.ClientSession(auto_decompress=False) as s:
+            async with s.post(url, data=b'{"messages":[]}') as r:
+                assert r.headers.get("Content-Encoding") == "gzip"
+                raw = await r.content.read()
+                assert raw == gzip.compress(b"hello world")
+    finally:
+        await client.close()
+        await origin_server.close()
+
+
 # -- health probe / singleton -------------------------------------------------
 @pytest.mark.asyncio
 async def test_health_endpoint(unused_tcp_port):
