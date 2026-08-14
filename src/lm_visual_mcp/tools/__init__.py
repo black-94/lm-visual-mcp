@@ -32,8 +32,8 @@ class VisionSession:
         )
         self.router = router or ProviderRouter(cfg)
         # Serializes request execution across every caller (all MCP sessions in
-        # the shared daemon funnel through this one session). Requests beyond
-        # runtime.max_concurrency queue here; set it to 1 for strict serial.
+        # the shared lm-vision-server funnel through this one session). Requests
+        # beyond runtime.max_concurrency queue here; set it to 1 for strict serial.
         self._sem = asyncio.Semaphore(cfg.runtime.max_concurrency)
 
     def _make_media_service(self, workdir: Optional[Path] = None) -> MediaService:

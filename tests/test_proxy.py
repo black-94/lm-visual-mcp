@@ -134,6 +134,85 @@ def test_multi_image_same_request(tmp_path):
     assert [p["text"] for p in parts[1:]] == ["[Image 1]\nfirst", "[Image 2]\nsecond"]
 
 
+def test_anthropic_rewrites_image_nested_in_tool_result(tmp_path):
+    """Images inside tool_result.content must be rewritten, not passed through."""
+    from lm_visual_mcp.proxy.anthropic import AnthropicAdapter
+
+    ad = AnthropicAdapter()
+    body = json.dumps({"messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "text", "text": "screenshot:"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                        "data": base64.b64encode(PNG).decode()}},
+        ]},
+    ]}]}).encode()
+    assert ad.has_image(body)
+    ex = ad.extract(body, _media(tmp_path))
+    assert len(ex.slots) == 1
+    ex.slots[0].apply("a screenshot")
+    blocks = json.loads(serialize(ex.doc))["messages"][0]["content"][0]["content"]
+    assert blocks[1] == {"type": "text", "text": "[Image 1]\na screenshot"}
+
+
+def test_anthropic_rewrites_image_at_arbitrary_depth(tmp_path):
+    """Extraction walks the whole doc, not just top-level message content."""
+    from lm_visual_mcp.proxy.anthropic import AnthropicAdapter
+
+    ad = AnthropicAdapter()
+    body = json.dumps({"messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": [
+            {"type": "text", "text": "outer"},
+            {"type": "tool_result", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                            "data": base64.b64encode(PNG).decode()}},
+            ]},
+        ]},
+    ]}]}).encode()
+    ex = ad.extract(body, _media(tmp_path))
+    assert len(ex.slots) == 1
+    ex.slots[0].apply("deep")
+    inner = json.loads(serialize(ex.doc))["messages"][0]["content"][0]["content"][1]["content"]
+    assert inner[0] == {"type": "text", "text": "[Image 1]\ndeep"}
+
+
+def test_openai_chat_rewrites_image_url_nested(tmp_path):
+    from lm_visual_mcp.proxy.openai_chat import OpenAIChatAdapter
+
+    ad = OpenAIChatAdapter()
+    body = json.dumps({"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "step 1"},
+        {"type": "tool_result", "content": [
+            {"type": "image_url", "image_url": {"url": DATA_URL}},
+        ]},
+    ]}]}).encode()
+    assert ad.has_image(body)
+    ex = ad.extract(body, _media(tmp_path))
+    assert len(ex.slots) == 1
+    ex.slots[0].apply("a chart")
+    inner = json.loads(serialize(ex.doc))["messages"][0]["content"][1]["content"]
+    assert inner[0] == {"type": "text", "text": "[Image 1]\na chart"}
+
+
+def test_openai_responses_rewrites_input_image_nested(tmp_path):
+    from lm_visual_mcp.proxy.openai_responses import OpenAIResponsesAdapter
+
+    ad = OpenAIResponsesAdapter()
+    body = json.dumps({"input": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "step 1"},
+            {"type": "tool_result", "content": [
+                {"type": "input_image", "image_url": DATA_URL},
+            ]},
+        ]},
+    ]}).encode()
+    assert ad.has_image(body)
+    ex = ad.extract(body, _media(tmp_path))
+    assert len(ex.slots) == 1
+    ex.slots[0].apply("a chart")
+    inner = json.loads(serialize(ex.doc))["input"][0]["content"][1]["content"]
+    assert inner[0] == {"type": "input_text", "text": "[Image 1]\na chart"}
+
+
 # -- cache ------------------------------------------------------------------
 def test_cache_per_image():
     c = VisionCache()

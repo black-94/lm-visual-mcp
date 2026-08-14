@@ -1,11 +1,11 @@
-"""Lifecycle management for the daemon and proxy singletons.
+"""Lifecycle management for the lm-vision-server and lm-proxy singletons.
 
 Both singletons are normally auto-started by the MCP client (``_serve``), but :
 functions also let them be managed independently:
 
-    lm-visual-mcp start|stop|restart [--service daemon|proxy]
+    lm-visual-mcp start|stop|restart [--service server|proxy]
 
-A service is identified two ways: its pidfile (daemon/proxy both write one, only
+A service is identified two ways: its pidfile (server/proxy both write one, only
 the process that wins the port bind) and, as a fallback for stale pidfiles, the
 PID listening on its port. ``stop`` prefers the pidfile + process-cmdline check
 to avoid killing an unrelated process that reused the PID.
@@ -21,27 +21,27 @@ from typing import Optional
 
 from ..config import AppConfig
 from .control import default_pidfile, proxy_pidfile, read_pidfile, unlink_pidfile
-from .proxy import probe_primary, probe_proxy, start_primary, start_proxy
+from .proxy import probe_server, probe_proxy, start_server, start_proxy
 
 logger = logging.getLogger("lm_visual_mcp.lifecycle")
 
-SERVICES = ("daemon", "proxy")
+SERVICES = ("server", "proxy")
 
 
 def service_targets(cfg: AppConfig, name: str) -> tuple[str, int, object]:
     """Return ``(name, port, pidfile)`` for a service."""
-    if name == "daemon":
-        return "daemon", cfg.runtime.port, default_pidfile()
+    if name == "server":
+        return "server", cfg.runtime.port, default_pidfile()
     return "proxy", cfg.proxy.port, proxy_pidfile()
 
 
 def start_service(cfg: AppConfig, name: str, config_path: Optional[str]) -> dict:
     """Ensure ``name`` is running (probe-then-launch). Returns a status dict."""
-    if name == "daemon":
+    if name == "server":
         host, port = cfg.runtime.host, cfg.runtime.port
-        if probe_primary(host, port):
+        if probe_server(host, port):
             return {"service": name, "status": "already-running", "port": port}
-        ok = start_primary(cfg, config_path, host, port)
+        ok = start_server(cfg, config_path, host, port)
     else:
         host, port = cfg.proxy.host, cfg.proxy.port
         if probe_proxy(host, port):

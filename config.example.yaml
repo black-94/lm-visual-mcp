@@ -36,15 +36,13 @@ providers:
 runtime:
   workdir: null
   timeout: 120
-  # Requests beyond this queue inside the shared daemon. Set to 1 for strict
-  # serial execution.
+  # Requests beyond this queue inside the shared lm-vision-server. Set to 1 for
+  # strict serial execution.
   max_concurrency: 2
-  # Singleton transport: one shared daemon binds this host/port; every Claude
-  # Code session proxies to it.
+  # Singleton transport: one shared lm-vision-server binds this host/port; every
+  # Claude Code session proxies to it. It stays running (always-on) until stopped.
   host: 127.0.0.1
   port: 6506
-  # Daemon exits after this long with no traffic (avoids orphan processes).
-  idle_timeout_ms: 300000
 
 fallback:
   enabled: true

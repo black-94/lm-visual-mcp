@@ -76,12 +76,11 @@ class RuntimeConfig(pd.BaseModel):
     workdir: Optional[str] = None
     timeout: float = 120.0
     max_concurrency: int = 2
-    # Singleton (global single-instance) transport settings. The shared daemon
-    # binds this host/port; every Claude Code session proxies to it. Requests
-    # beyond ``max_concurrency`` queue inside the daemon.
+    # Singleton (global single-instance) transport settings. The shared
+    # lm-vision-server binds this host/port; every Claude Code session proxies
+    # to it. Requests beyond ``max_concurrency`` queue inside the server.
     host: str = "127.0.0.1"
     port: int = 6506
-    idle_timeout_ms: int = 300000
 
 
 class FallbackConfig(pd.BaseModel):
@@ -227,8 +226,6 @@ class ConfigLoader:
             data.setdefault("runtime", {})["host"] = e("HOST")
         if e("PORT"):
             data.setdefault("runtime", {})["port"] = int(e("PORT"))
-        if e("IDLE_TIMEOUT_MS"):
-            data.setdefault("runtime", {})["idle_timeout_ms"] = int(e("IDLE_TIMEOUT_MS"))
 
         for name in ("agy", "codex", "opencode"):
             cmd = e(f"{name.upper()}_COMMAND")

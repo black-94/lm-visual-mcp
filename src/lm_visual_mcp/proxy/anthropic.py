@@ -10,7 +10,7 @@ import json
 from ..errors import MediaError
 from ..services.media import MediaService
 from .media import from_base64_bytes
-from .types import Extracted, ImageSlot, ProtocolAdapter
+from .types import Extracted, ImageSlot, ProtocolAdapter, iter_image_blocks
 
 
 class AnthropicAdapter(ProtocolAdapter):
@@ -22,24 +22,18 @@ class AnthropicAdapter(ProtocolAdapter):
     def extract(self, body: bytes, media: MediaService) -> Extracted:
         doc = json.loads(body)
         slots: list[ImageSlot] = []
-        for msg in doc.get("messages", []):
-            content = msg.get("content")
-            if not isinstance(content, list):
+        for content, i, block in iter_image_blocks(doc, lambda b: b.get("type") == "image"):
+            source = block.get("source") or {}
+            data = source.get("data", "")
+            media_type = source.get("media_type", "image/png")
+            try:
+                image = from_base64_bytes(data, media_type, media)
+            except MediaError:
                 continue
-            for i, block in enumerate(content):
-                if not isinstance(block, dict) or block.get("type") != "image":
-                    continue
-                source = block.get("source") or {}
-                data = source.get("data", "")
-                media_type = source.get("media_type", "image/png")
-                try:
-                    image = from_base64_bytes(data, media_type, media)
-                except MediaError:
-                    continue
-                index = len(slots)
+            index = len(slots)
 
-                def _apply(text: str, _content: list = content, _i: int = i, _index: int = index) -> None:
-                    _content[_i] = {"type": "text", "text": f"[Image {_index + 1}]\n{text}"}
+            def _apply(text: str, _content: list = content, _i: int = i, _index: int = index) -> None:
+                _content[_i] = {"type": "text", "text": f"[Image {_index + 1}]\n{text}"}
 
-                slots.append(ImageSlot(image, _apply))
+            slots.append(ImageSlot(image, _apply))
         return Extracted(doc, slots)

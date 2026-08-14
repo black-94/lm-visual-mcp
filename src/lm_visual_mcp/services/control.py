@@ -1,7 +1,7 @@
-"""Shared single-instance daemon (server side).
+"""Shared single-instance lm-vision-server (server side).
 
 The default CLI entry is a *client* that proxies MCP tool calls over HTTP to a
-single shared daemon. This module is that daemon: a plain HTTP loopback service
+single shared server. This module is that server: a plain HTTP loopback service
 (no stdio, no MCP transport) that owns the one global ``VisionSession`` and
 serializes every request through its concurrency semaphore.
 
@@ -10,9 +10,9 @@ Endpoints
     POST /tool    -> ``{"tool","image_sources","video_sources","user_prompt",
                        "output_type"}`` in, MCP envelope JSON out.
 
-The daemon binds the port *before* daemonizing so a port conflict (another live
-daemon) is detected and exits cleanly without writing a pidfile. It reclaims
-itself after ``idle_timeout_ms`` of no traffic.
+The server binds the port *before* detaching so a port conflict (another live
+server) is detected and exits cleanly without writing a pidfile. Once started it
+stays running (always-on) until stopped.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ from ..config import AppConfig
 
 logger = logging.getLogger("lm_visual_mcp.control")
 
-#: Where the daemon writes its PID (used for diagnosis / cleanup).
-DEFAULT_PIDFILE = Path("~/.cache/lm-visual-mcp/lm-visual-mcp.pid").expanduser()
-#: Where the vision proxy writes its PID.
+#: Where the lm-vision-server writes its PID (used for diagnosis / cleanup).
+DEFAULT_PIDFILE = Path("~/.cache/lm-visual-mcp/lm-visual-mcp-server.pid").expanduser()
+#: Where the lm-proxy writes its PID.
 PROXY_PIDFILE = Path("~/.cache/lm-visual-mcp/lm-visual-mcp-proxy.pid").expanduser()
 
 
@@ -71,8 +71,8 @@ def unlink_pidfile(pidfile: Path) -> None:
         pass
 
 
-def daemonize(pidfile: Path) -> None:
-    """Detach into a background daemon.
+def detach(pidfile: Path) -> None:
+    """Detach into a background server process.
 
     Runs only in the process that will serve. On POSIX this is the fully-forked
     grandchild (double fork + setsid) so the intermediate parents exit and the
@@ -82,7 +82,7 @@ def daemonize(pidfile: Path) -> None:
     redirect logs. Logs after this point go to a file next to the pidfile.
     """
     if platform.system() == "Windows":
-        _daemonize_windows(pidfile)
+        _detach_windows(pidfile)
         return
 
     if os.fork() > 0:
@@ -112,12 +112,12 @@ def daemonize(pidfile: Path) -> None:
     except OSError:
         pass
 
-    # Redirect logging to a file so daemon errors are not silently lost.
-    _setup_daemon_logging(pidfile.parent)
+    # Redirect logging to a file so server errors are not silently lost.
+    _setup_server_logging(pidfile.parent)
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Loopback HTTP handler for the shared daemon."""
+    """Loopback HTTP handler for the shared lm-vision-server."""
 
     def log_message(self, *args) -> None:  # silence default stderr logging
         pass
@@ -140,7 +140,6 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         ts = self._tool_server()
         if self.path == "/health":
-            ts.touch()
             # Import-light: tool_names carries no heavy deps, so a cold-start
             # probe answers instantly instead of stalling on the server stack.
             from ..tool_names import _TOOL_NAMES
@@ -161,7 +160,6 @@ class _Handler(BaseHTTPRequestHandler):
         ts = self._tool_server()
         if self.path != "/tool":
             return self._json(404, {"ok": False, "error": "not found"})
-        ts.touch()
         length = int(self.headers.get("Content-Length", 0) or 0)
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
@@ -187,20 +185,17 @@ class ToolServer:
         cfg: AppConfig,
         host: str,
         port: int,
-        idle_timeout_ms: int,
         session_factory=None,
     ) -> None:
         self.cfg = cfg
         self.host = host
         self.port = port
-        self.idle_timeout_ms = idle_timeout_ms
         # Test seam: override to inject a VisionSession wired to a fake router.
         self.session_factory = session_factory or self._default_session
         self.loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._session: Optional[VisionSession] = None
         self._server: Optional[ThreadingHTTPServer] = None
         self._ready = threading.Event()
-        self._last_activity = time.monotonic()
         self.execution_timeout = cfg.runtime.timeout + 300.0
 
     @staticmethod
@@ -222,9 +217,6 @@ class ToolServer:
         assert self._session is not None
         return self._session
 
-    def touch(self) -> None:
-        self._last_activity = time.monotonic()
-
     def bind(self) -> None:
         """Bind the socket. Raises :class:`OSError` if the port is taken."""
         self._server = ThreadingHTTPServer((self.host, self.port), _Handler)
@@ -232,9 +224,7 @@ class ToolServer:
 
     def serve(self) -> None:
         assert self._server is not None
-        threading.Thread(target=self._loop_main, name="daemon-loop", daemon=True).start()
-        if self.idle_timeout_ms > 0:
-            threading.Thread(target=self._reaper, name="daemon-reaper", daemon=True).start()
+        threading.Thread(target=self._loop_main, name="server-loop", daemon=True).start()
         # Serve immediately; the session is built concurrently in the loop
         # thread and /tool handlers wait for it via the ``session`` property.
         try:
@@ -254,21 +244,11 @@ class ToolServer:
         self._ready.set()
         self.loop.run_forever()
 
-    def _reaper(self) -> None:
-        interval = max(min(self.idle_timeout_ms / 1000.0 / 2.0, 5.0), 0.5)
-        while True:
-            time.sleep(interval)
-            idle_ms = (time.monotonic() - self._last_activity) * 1000.0
-            if idle_ms >= self.idle_timeout_ms:
-                logger.info("daemon idle for %dms; reclaiming", self.idle_timeout_ms)
-                self.stop()
-                return
-
     # -- tool dispatch -----------------------------------------------------
     async def run_tool(self, payload: dict) -> dict:
         """Route a normalized tool payload to the shared VisionSession.
 
-        ``get_system_prompt`` stays on the daemon side (single place); the
+        ``get_system_prompt`` stays on the server side (single place); the
         client only forwards raw tool semantics.
         """
         tool = payload.get("tool")
@@ -289,27 +269,27 @@ class ToolServer:
         )
 
 
-def run_daemon(cfg: AppConfig) -> int:
-    """Entry for the ``--daemon`` subcommand: bind, daemonize, serve."""
+def run_server(cfg: AppConfig) -> int:
+    """Entry for the ``--server`` subcommand: bind, detach, serve."""
     host, port = cfg.runtime.host, cfg.runtime.port
-    ts = ToolServer(cfg, host, port, cfg.runtime.idle_timeout_ms)
+    ts = ToolServer(cfg, host, port)
     try:
         ts.bind()
     except OSError as exc:
-        # Another live daemon already holds the port — exit quietly and let the
+        # Another live server already holds the port — exit quietly and let the
         # client connect to the existing one.
         logger.info("port %s:%s already in use (%s); exiting", host, port, exc)
         return 0
-    daemonize(default_pidfile())
+    detach(default_pidfile())
     ts.serve()
     return 0
 
 
-def _setup_daemon_logging(log_dir: Path) -> None:
-    """Set up file-based logging for the daemon process."""
+def _setup_server_logging(log_dir: Path) -> None:
+    """Set up file-based logging for the lm-vision-server process."""
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "daemon.log"
+        log_file = log_dir / "lm-vision-server.log"
         handler = logging.FileHandler(str(log_file), encoding="utf-8")
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -318,15 +298,15 @@ def _setup_daemon_logging(log_dir: Path) -> None:
         root.handlers = [handler]
         root.setLevel(logging.INFO)
     except OSError:
-        pass  # best-effort; don't crash the daemon if log setup fails
+        pass  # best-effort; don't crash the server if log setup fails
 
 
-def _daemonize_windows(pidfile: Path) -> None:
+def _detach_windows(pidfile: Path) -> None:
     """Windows detach: no double-fork, the client already backgrounded us.
 
     The detached spawn (``start_new_session`` + DEVNULL stdio) happens in
-    ``start_primary``/``start_proxy`` on the client side; here we only persist
-    the pidfile and route logs to a file. If the daemon was started directly
+    ``start_server``/``start_proxy`` on the client side; here we only persist
+    the pidfile and route logs to a file. If the server was started directly
     from a console, it stays attached to that console — acceptable fallback,
     since a true background detach on Windows requires the client-spawn path.
     """
@@ -335,4 +315,4 @@ def _daemonize_windows(pidfile: Path) -> None:
         pidfile.write_text(str(os.getpid()))
     except OSError:
         pass
-    _setup_daemon_logging(pidfile.parent)
+    _setup_server_logging(pidfile.parent)

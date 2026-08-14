@@ -1,12 +1,13 @@
-"""Client-side proxy for the shared single-instance daemon.
+"""Client-side proxy for the shared single-instance lm-vision-server.
 
 The default CLI entry runs this proxy: it presents the normal MCP stdio server
 to Claude Code, but forwards every tool call over loopback HTTP to the one
-shared daemon (see :mod:`lm_visual_mcp.services.control`).
+shared lm-vision-server (see :mod:`lm_visual_mcp.services.control`).
 
-Startup policy (probe-then-launch): probe the daemon's ``/health``; if present,
-reuse it; otherwise spawn the daemon once and wait for it to come up, then
-proxy to it. A dead daemon mid-request is restarted on the next call.
+Startup policy (probe-then-launch): probe the server's ``/health``; if present,
+reuse it; otherwise spawn the server once and wait for it to come up, then
+proxy to it. There is no runtime keep-alive: if the server dies mid-request,
+the call fails and the user restarts the MCP session or runs a manual command.
 """
 
 from __future__ import annotations
@@ -27,8 +28,8 @@ from ..config import AppConfig
 logger = logging.getLogger("lm_visual_mcp.proxy")
 
 
-def probe_primary(host: str, port: int, timeout: float = 1.0) -> bool:
-    """Return True if a healthy daemon answers on host:port."""
+def probe_server(host: str, port: int, timeout: float = 1.0) -> bool:
+    """Return True if a healthy lm-vision-server answers on host:port."""
     req = urllib.request.Request(f"http://{host}:{port}/health", method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -102,21 +103,21 @@ def start_proxy(
     return probe_proxy(host, port, 0.5)
 
 
-def start_primary(
+def start_server(
     cfg: AppConfig,
     config_path: Optional[str],
     host: str,
     port: int,
     max_wait: float = 5.0,
 ) -> bool:
-    """Spawn the shared daemon (``--daemon``) and wait until it answers.
+    """Spawn the shared lm-vision-server (``--server``) and wait until it answers.
 
-    The daemon re-resolves its own config via the same priority (file/env/CLI)
-    given ``config_path``. Safe under concurrency: only one spawned daemon can
+    The server re-resolves its own config via the same priority (file/env/CLI)
+    given ``config_path``. Safe under concurrency: only one spawned server can
     bind the port; the others exit quietly and every caller connects to the
     winner.
     """
-    cmd = [sys.executable, "-m", "lm_visual_mcp", "daemon"]
+    cmd = [sys.executable, "-m", "lm_visual_mcp", "server"]
     if config_path:
         cmd += ["--config", config_path]
     if not _spawn_detached(cmd):
@@ -124,19 +125,19 @@ def start_primary(
 
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
-        if probe_primary(host, port, 0.5):
+        if probe_server(host, port, 0.5):
             return True
         time.sleep(0.1)
-    return probe_primary(host, port, 0.5)
+    return probe_server(host, port, 0.5)
 
 
 class ProxyVisionSession:
-    """Drop-in for :class:`VisionSession` that forwards over HTTP to the daemon.
+    """Drop-in for :class:`VisionSession` that forwards over HTTP to the server.
 
     Same signature surface (``analyze_images`` / ``analyze_video``) so
     ``build_server(cfg, session=...)`` reuses the existing tool handlers
-    unchanged. Only the daemon owns a real ``VisionSession`` and computes
-    ``get_system_prompt``; this side just shuttles normalized payloads.
+    unchanged. Only the lm-vision-server owns a real ``VisionSession`` and
+    computes ``get_system_prompt``; this side just shuttles normalized payloads.
     """
 
     def __init__(
@@ -144,16 +145,11 @@ class ProxyVisionSession:
         cfg: AppConfig,
         host: Optional[str] = None,
         port: Optional[int] = None,
-        *,
-        config_path: Optional[str] = None,
     ) -> None:
         self.cfg = cfg
         self.host = host or cfg.runtime.host
         self.port = port or cfg.runtime.port
-        self.config_path = config_path
         self._timeout = cfg.runtime.timeout + 300.0
-        # Set True after one in-flight restart+retry; second consecutive failure raises.
-        self._started_once = False
 
     # -- public API (mirrors VisionSession) -------------------------------
     async def analyze_images(
@@ -186,18 +182,10 @@ class ProxyVisionSession:
 
     # -- core ----------------------------------------------------------------
     async def _call(self, **payload: object) -> dict:
-        try:
-            result = await asyncio.to_thread(self._post, payload)
-        except (urllib.error.URLError, ConnectionError, OSError):
-            if self._started_once:
-                raise
-            self._started_once = True
-            logger.info("daemon unresponsive; restarting on %s:%s", self.host, self.port)
-            start_primary(self.cfg, self.config_path, self.host, self.port)
-            result = await asyncio.to_thread(self._post, payload)
-        # Daemon is alive; allow a future restart if it crashes again later.
-        self._started_once = False
-        return result
+        # No runtime keep-alive: the server is probed+launched once at MCP
+        # startup. If it dies mid-session, this call fails and the user restarts
+        # the MCP session or runs a manual ``lm-visual-mcp start``.
+        return await asyncio.to_thread(self._post, payload)
 
     def _post(self, payload: dict) -> dict:
         req = urllib.request.Request(

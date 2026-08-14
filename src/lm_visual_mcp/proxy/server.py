@@ -93,7 +93,7 @@ class VisionProxyApp:
         return app
 
     async def health(self, request: web.Request) -> web.Response:
-        """Singleton probe endpoint (mirrors the daemon's ``/health``)."""
+        """Singleton probe endpoint (mirrors the lm-vision-server's ``/health``)."""
         return web.json_response({"ok": True, "version": __version__, "pid": os.getpid()})
 
     async def _close(self, app) -> None:

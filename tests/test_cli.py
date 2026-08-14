@@ -29,13 +29,13 @@ def test_default_config_is_none() -> None:
     assert args.log_level is None
 
 
-def test_daemon_subcommand() -> None:
-    args = build_parser().parse_args(["--config", "a.yaml", "daemon"])
-    assert args.command == "daemon"
+def test_server_subcommand() -> None:
+    args = build_parser().parse_args(["--config", "a.yaml", "server"])
+    assert args.command == "server"
     assert args.config == "a.yaml"
 
 
-def test_daemon_config_after_subcommand() -> None:
-    args = build_parser().parse_args(["daemon", "--config", "a.yaml"])
-    assert args.command == "daemon"
+def test_server_config_after_subcommand() -> None:
+    args = build_parser().parse_args(["server", "--config", "a.yaml"])
+    assert args.command == "server"
     assert args.config == "a.yaml"

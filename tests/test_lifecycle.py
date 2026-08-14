@@ -19,8 +19,8 @@ def test_service_targets():
     cfg = AppConfig()
     cfg.runtime.port = 6506
     cfg.proxy.port = 8787
-    name, port, pidfile = service_targets(cfg, "daemon")
-    assert (name, port) == ("daemon", 6506)
+    name, port, pidfile = service_targets(cfg, "server")
+    assert (name, port) == ("server", 6506)
     assert pidfile == default_pidfile()
     name, port, pidfile = service_targets(cfg, "proxy")
     assert (name, port) == ("proxy", 8787)
@@ -54,7 +54,7 @@ def test_pid_on_port(unused_tcp_port):
 def test_is_our_process_negative():
     from lm_visual_mcp.services.lifecycle import _is_our_process
 
-    assert _is_our_process(999999999, "daemon") is False  # nonexistent pid
+    assert _is_our_process(999999999, "server") is False  # nonexistent pid
 
 
 def test_start_service_already_running(monkeypatch):
@@ -62,9 +62,9 @@ def test_start_service_already_running(monkeypatch):
 
     cfg = AppConfig()
     monkeypatch.setattr("lm_visual_mcp.services.lifecycle.probe_proxy", lambda *a, **k: True)
-    monkeypatch.setattr("lm_visual_mcp.services.lifecycle.probe_primary", lambda *a, **k: True)
+    monkeypatch.setattr("lm_visual_mcp.services.lifecycle.probe_server", lambda *a, **k: True)
     assert start_service(cfg, "proxy", None)["status"] == "already-running"
-    assert start_service(cfg, "daemon", None)["status"] == "already-running"
+    assert start_service(cfg, "server", None)["status"] == "already-running"
 
 
 def test_stop_service_kills_pidfile_process(monkeypatch, tmp_path):
@@ -79,7 +79,7 @@ def test_stop_service_kills_pidfile_process(monkeypatch, tmp_path):
     pidfile.write_text(str(proc.pid))
     try:
         monkeypatch.setattr("lm_visual_mcp.services.lifecycle._is_our_process", lambda pid, n: True)
-        res = stop_service("daemon", 60001, pidfile)
+        res = stop_service("server", 60001, pidfile)
         assert res["status"] == "stopped"
         proc.wait(timeout=5)
         assert proc.poll() is not None  # child terminated
@@ -92,5 +92,5 @@ def test_stop_service_kills_pidfile_process(monkeypatch, tmp_path):
 def test_stop_service_not_running(tmp_path):
     from lm_visual_mcp.services.lifecycle import stop_service
 
-    res = stop_service("daemon", 60002, tmp_path / "missing.pid")
+    res = stop_service("server", 60002, tmp_path / "missing.pid")
     assert res["status"] == "not-running"

@@ -41,3 +41,25 @@ class ProtocolAdapter:
 def serialize(doc: dict) -> bytes:
     """Serialize a parsed request doc back to bytes for forwarding."""
     return json.dumps(doc).encode("utf-8")
+
+
+def iter_image_blocks(node, is_image):
+    """Yield ``(container, index, block)`` for every image block anywhere in a request doc.
+
+    Claude Code and other SDKs nest images inside ``tool_result.content`` and
+    other content-block lists, not just top-level message content. ``has_image()``
+    already spans the whole body with a byte search, so extraction must span the
+    whole document too — otherwise we detect an image we cannot rewrite and fall
+    back to raw passthrough, which a text-only upstream then rejects. This
+    depth-first walk finds every content block satisfying ``is_image`` regardless
+    of nesting depth.
+    """
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from iter_image_blocks(value, is_image)
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            if isinstance(item, dict) and is_image(item):
+                yield (node, i, item)
+            else:
+                yield from iter_image_blocks(item, is_image)

@@ -1,11 +1,11 @@
-"""Singleton tests: concurrency queueing, daemon /health probe, proxy forwarding.
+"""Singleton tests: concurrency queueing, server /health probe, proxy forwarding.
 
 Covers the connect-or-spawn single-instance design:
 
 - ``VisionSession`` enforces ``runtime.max_concurrency`` via a semaphore so
   requests beyond the limit queue.
 - A shared ``ToolServer`` answers ``GET /health`` (probe target).
-- ``ProxyVisionSession`` forwards tool calls over HTTP to the daemon and
+- ``ProxyVisionSession`` forwards tool calls over HTTP to the server and
   returns its envelope.
 """
 
@@ -22,7 +22,7 @@ from PIL import Image
 from lm_visual_mcp.config import AppConfig
 from lm_visual_mcp.models import ProviderUsage
 from lm_visual_mcp.services.control import ToolServer
-from lm_visual_mcp.services.proxy import ProxyVisionSession, probe_primary
+from lm_visual_mcp.services.proxy import ProxyVisionSession, probe_server
 from lm_visual_mcp.tools import VisionSession
 
 
@@ -85,23 +85,23 @@ async def test_max_concurrency_allows_up_to_limit(tmp_path):
     assert 1 < router.max_in_flight <= 2
 
 
-def test_probe_primary_health_and_absent():
+def test_probe_server_health_and_absent():
     port = _free_port()
     cfg = AppConfig.model_validate({"runtime": {"host": "127.0.0.1", "port": port}})
-    ts = ToolServer(cfg, "127.0.0.1", port, 60000)
+    ts = ToolServer(cfg, "127.0.0.1", port)
     ts.bind()
     threading.Thread(target=ts.serve, daemon=True).start()
     try:
         deadline = time.monotonic() + 5
-        while not probe_primary("127.0.0.1", port) and time.monotonic() < deadline:
+        while not probe_server("127.0.0.1", port) and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert probe_primary("127.0.0.1", port)
-        assert not probe_primary("127.0.0.1", port + 1000, 0.2)
+        assert probe_server("127.0.0.1", port)
+        assert not probe_server("127.0.0.1", port + 1000, 0.2)
     finally:
         ts.stop()
 
 
-async def test_proxy_forwards_to_daemon(tmp_path):
+async def test_proxy_forwards_to_server(tmp_path):
     port = _free_port()
     cfg = AppConfig.model_validate({"runtime": {"host": "127.0.0.1", "port": port, "timeout": 30}})
 
@@ -117,14 +117,14 @@ async def test_proxy_forwards_to_daemon(tmp_path):
             )
 
     ts = ToolServer(
-        cfg, "127.0.0.1", port, 60000,
+        cfg, "127.0.0.1", port,
         session_factory=lambda c: VisionSession(c, router=FakeRouter()),
     )
     ts.bind()
     threading.Thread(target=ts.serve, daemon=True).start()
     try:
         for _ in range(100):
-            if probe_primary("127.0.0.1", port):
+            if probe_server("127.0.0.1", port):
                 break
             await asyncio.sleep(0.05)
         proxy = ProxyVisionSession(cfg, "127.0.0.1", port)
