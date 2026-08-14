@@ -229,7 +229,16 @@ class VisionProxyApp:
         if self._session is None:
             import aiohttp
 
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(
+                # Byte-level transparency: forward raw upstream bytes (and their
+                # Content-Encoding) untouched instead of having aiohttp decode
+                # them. The classifier path below decompresses explicitly when
+                # it needs to parse JSON.
+                auto_decompress=False,
+                # Don't inject aiohttp's own Accept-Encoding / Accept / User-Agent
+                # into the forward request; only the caller's headers go out.
+                skip_auto_headers=("*",),
+            )
         return self._session
 
     async def _forward(
@@ -245,7 +254,9 @@ class VisionProxyApp:
         out_headers = _passthrough_headers(request.headers)
         out_headers["Host"] = _host_of(url)
         out_headers["Content-Length"] = str(len(body))
-        async with session.request(request.method, url, headers=out_headers, data=body) as resp:
+        async with session.request(
+            request.method, url, headers=out_headers, data=body, allow_redirects=False
+        ) as resp:
             resp_headers = _passthrough_headers(resp.headers)
             resp_headers.pop("Content-Length", None)  # streamed; aiohttp frames it
             if (
@@ -253,13 +264,12 @@ class VisionProxyApp:
                 and resp.status == 200
                 and "json" in (resp.headers.get("Content-Type") or "").lower()
             ):
-                upstream_body = await resp.read()
-                rewritten_body, changed = normalize_auto_classifier_response(upstream_body)
-                if changed:
-                    # The payload is now decoded and rewritten, so validators
-                    # and encodings tied to the upstream bytes no longer apply.
-                    for header in ("Content-Encoding", "Content-MD5", "ETag"):
-                        resp_headers.pop(header, None)
+                upstream_body = await _read_decompressed(resp)
+                rewritten_body = normalize_auto_classifier_response(upstream_body)[0]
+                # The payload is now decoded (and possibly rewritten), so
+                # encodings and validators tied to the upstream bytes no longer
+                # describe what we're about to send.
+                resp_headers = _decompressed_body_headers(resp_headers)
                 return web.Response(
                     status=resp.status,
                     headers=resp_headers,
@@ -267,6 +277,8 @@ class VisionProxyApp:
                 )
             stream = web.StreamResponse(status=resp.status, headers=resp_headers)
             await stream.prepare(request)
+            # auto_decompress=False: resp.content yields the raw upstream bytes,
+            # so a gzip body is forwarded gzip and the client decompresses it.
             async for chunk in resp.content.iter_any():
                 await stream.write(chunk)
             return stream
@@ -316,6 +328,49 @@ def _passthrough_headers(headers) -> dict:
         if lk in _HOP or lk in conn_tokens:
             continue
         out[key] = value
+    return out
+
+
+async def _read_decompressed(resp) -> bytes:
+    """Read the upstream body, decoding per its ``Content-Encoding``.
+
+    The proxy session runs with ``auto_decompress=False`` so `resp.content`
+    yields raw bytes. Callers that must parse the body (classifier
+    normalization) decompress explicitly here; on unknown/absent encodings the
+    raw bytes are returned untouched.
+    """
+    body = await resp.content.read()
+    enc = (resp.headers.get("Content-Encoding") or "").lower()
+    if enc == "gzip":
+        import gzip
+
+        return gzip.decompress(body)
+    if enc == "deflate":
+        import zlib
+
+        try:
+            return zlib.decompress(body)
+        except zlib.error:
+            return zlib.decompress(body, -zlib.MAX_WBITS)  # raw deflate
+    if enc == "br":
+        try:
+            import brotli
+        except ImportError:
+            return body
+        return brotli.decompress(body)
+    return body
+
+
+def _decompressed_body_headers(headers: dict) -> dict:
+    """Drop headers that no longer describe the body being forwarded.
+
+    Used where the proxy has decoded/rewritten the upstream payload (classifier
+    normalization), so the upstream ``Content-Encoding`` and byte-level
+    validators no longer describe the plaintext bytes we send.
+    """
+    out = dict(headers)
+    for key in ("Content-Encoding", "Content-MD5", "ETag"):
+        out.pop(key, None)
     return out
 
 
