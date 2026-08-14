@@ -17,7 +17,7 @@ end-to-end video attachment path. See [Current limitations](#current-limitations
 - 8 task-oriented vision tools plus 2 compatibility aliases.
 - Server-controlled provider routing: AGY → Codex → Gemini → OpenCode by default.
 - Per-task workspaces and bounded media downloads.
-- A shared local daemon, reused by multiple MCP client processes.
+- A shared local lm-vision-server, reused by multiple MCP client processes.
 - Unified JSON results regardless of provider.
 - A transparent OpenAI Chat, OpenAI Responses, and Anthropic Messages proxy.
 - Claude Code Auto classifier request and first-stage response compatibility.
@@ -35,7 +35,7 @@ MCP client process
 lm-visual-mcp client
     │ loopback HTTP
     ▼
-shared daemon (one VisionSession)
+lm-vision-server (one VisionSession)
     ├── prompt selection
     ├── workspace/media staging
     ├── concurrency limit
@@ -44,10 +44,10 @@ shared daemon (one VisionSession)
 
 ```text
 OpenAI / Anthropic SDK
-    │ base_url points at the proxy
+    │ base_url points at lm-proxy
     ▼
-Vision Proxy
-    ├── no image: forward the original request body
+lm-proxy
+    ├── no image: forward the original request body unchanged
     └── image: extract → cache/describe → replace with text
     │
     ▼
@@ -55,10 +55,14 @@ upstream model API (responses/SSE stream back; classifier stage one is normalize
 ```
 
 Running `lm-visual-mcp` without a subcommand starts an MCP stdio client. It probes the
-shared daemon and Vision Proxy, starts missing services, then forwards MCP calls to the
-daemon. `runtime.max_concurrency` limits work across all connected MCP clients. The daemon
-exits after `runtime.idle_timeout_ms` without traffic; the proxy remains running until it
-is stopped.
+shared lm-vision-server and lm-proxy, starts missing services, then forwards MCP calls to
+the server. `runtime.max_concurrency` limits work across all connected MCP clients.
+
+Both singletons are **always-on** (常驻): once started they stay running until stopped.
+At MCP startup the client probes each singleton's `/health` and launches it exactly once
+if missing — there is **no runtime keep-alive or monitoring**. If lm-vision-server or
+lm-proxy is unexpectedly killed, the MCP session's tool calls simply fail; restart the
+Claude Code session (which re-probes and re-launches) or run `lm-visual-mcp start`.
 
 ## Requirements
 
@@ -157,13 +161,28 @@ Available protocol paths are:
 SDK-appended endpoint paths are supported. For example, an Anthropic SDK may append
 `/v1/messages`; the proxy rebases that suffix onto the decoded upstream base URL.
 
+> **Tested upstream**: the proxy has so far only been exercised against **DeepSeek** as
+> the upstream text backend. Other upstreams are expected to work but are not yet verified.
+
 Important current behavior:
 
-- Image-free requests normally keep their body bytes unchanged. The exception is a detected
-  classifier when `proxy.classifier.disable_thinking: true`, which inserts `thinking: disabled`.
-- OpenAI adapters accept data URLs and HTTP(S) image URLs.
-- The Anthropic adapter currently accepts base64 image sources.
+- **Byte-transparent passthrough**: the proxy is a transparent proxy — it disables aiohttp's
+  automatic decompression and header rewriting (`auto_decompress=False`,
+  `skip_auto_headers=("*",)`) and disables redirects, so an image-free request is forwarded
+  upstream byte-for-byte with no decompress/recompress round-trip. The only exception is a
+  detected classifier when `proxy.classifier.disable_thinking: true`, which inserts
+  `thinking: disabled`.
+- **Recursive image extraction**: images are rewritten wherever they appear in a request —
+  not just top-level `messages[].content[]`. When Claude Code passes screenshots, `Read`
+  output, or other tool results as image blocks nested inside `tool_result.content`, those
+  are detected and rewritten too. This is what lets a text-only upstream accept tool-result
+  images instead of rejecting them with a "Model only support text input" 400.
+- OpenAI adapters accept data URLs and HTTP(S) image URLs; the Anthropic adapter accepts
+  base64 image sources.
 - Image parse failures fail open and forward the original request.
+- **~100 MB request ceiling**: the proxy raises aiohttp's default request-size limit
+  (`client_max_size`) from 1 MB to 100 MB so multi-image base64 payloads are not dropped by
+  the framework; a request body larger than 100 MB is still rejected.
 - Query strings sent to the proxy endpoint are currently not forwarded.
 - The proxy must remain on a trusted loopback interface; see [Security](#security).
 
@@ -178,36 +197,38 @@ For a detected classifier request, `proxy.classifier.disable_thinking` controls 
 rewriting only. It defaults to `true` and inserts `"thinking": {"type": "disabled"}`. Set it
 to `false` for an upstream model that rejects disabled thinking.
 
-First-stage classifier response normalization is always enabled and is independent of that
-option. Some Anthropic-compatible gateways ignore `stop_sequences` or return a leading thinking
-block. The proxy extracts one unambiguous `<block>yes</block>` or `<block>no</block>` text verdict
-and restores Anthropic stop-sequence framing: a single text block containing `<block>yes` or
-`<block>no`, with `stop_reason: "stop_sequence"` and `stop_sequence: "</block>"`. A response
-with no verdict or conflicting yes/no verdicts is not guessed or rewritten.
+First-stage response normalization is always enabled and is independent of that option. Some
+Anthropic-compatible gateways ignore `stop_sequences` or return a leading thinking block. The
+proxy extracts one unambiguous `<block>yes</block>` or `<block>no</block>` text verdict and
+restores Anthropic stop-sequence framing: a single text block with `stop_reason:
+"stop_sequence"` and `stop_sequence: "</block>"`. A response with no verdict or conflicting
+verdicts is never guessed or rewritten. The normalization path handles compressed
+(gzip/deflate/brotli) bodies. In stage one, `no` normally allows the action while `yes`
+indicates that a later stage may be needed — it is not necessarily a final denial.
 
-In stage one, `no` normally allows the action while `yes` indicates that a later stage may be
-needed; it is not necessarily a final denial. See
-[`classifier_compatibility.md`](classifier_compatibility.md) for the captured payload, exact
-detection rules, false-positive/false-negative boundaries, and verification record.
+The captured payload, exact detection rules, and false-positive/false-negative boundaries are
+documented in [`classifier_compatibility.md`](classifier_compatibility.md).
 
 ## CLI
 
 ```text
 lm-visual-mcp [--config PATH] [--log-level LEVEL]
 lm-visual-mcp doctor [--probe]
-lm-visual-mcp daemon
+lm-visual-mcp server
 lm-visual-mcp proxy [--host HOST] [--port PORT]
-lm-visual-mcp start   [--service daemon|proxy]
-lm-visual-mcp stop    [--service daemon|proxy]
-lm-visual-mcp restart [--service daemon|proxy]
+lm-visual-mcp start   [--service server|proxy]
+lm-visual-mcp stop    [--service server|proxy]
+lm-visual-mcp restart [--service server|proxy]
 lm-visual-mcp --version
 ```
 
-Common options may be placed before or after a subcommand. Without `--service`, lifecycle
-commands manage both services. `doctor --probe` performs a real AGY image smoke test and
-requires Pillow plus a working AGY CLI; it does not probe every provider with a paid call.
+`server` runs the shared lm-vision-server; `proxy` runs the lm-proxy. Common options may be
+placed before or after a subcommand. Without `--service`, lifecycle commands manage both
+services. `doctor --probe` performs a real AGY image smoke test and requires Pillow plus a
+working AGY CLI; it does not probe every provider with a paid call.
 
-Pidfiles and daemon logs live under `~/.cache/lm-visual-mcp/`.
+Pidfiles and per-service disk logs (`lm-vision-server.log`, `proxy.log`) live under
+`~/.cache/lm-visual-mcp/`.
 
 ## Configuration
 
@@ -230,25 +251,21 @@ See [`config.example.yaml`](config.example.yaml) for every current field. A mini
 version: 1
 
 providers:
-  order: [codex, gemini, opencode]
+  order: [agy, codex, gemini, opencode]
   agy:
-    enabled: false
+    enabled: true
     command: agy
   codex:
     enabled: true
     command: codex
-    model: null
     effort: high
   gemini:
     enabled: true
-    model: null
     effort: high
     api_key_env: GEMINI_API_KEY
   opencode:
     enabled: true
     command: opencode
-    model: null
-    effort: null
 
 runtime:
   workdir: null
@@ -256,7 +273,6 @@ runtime:
   max_concurrency: 2
   host: 127.0.0.1
   port: 6506
-  idle_timeout_ms: 300000
 
 fallback:
   enabled: true
@@ -295,7 +311,6 @@ LM_VISUAL_MCP_TIMEOUT
 LM_VISUAL_MCP_MAX_CONCURRENCY
 LM_VISUAL_MCP_HOST
 LM_VISUAL_MCP_PORT
-LM_VISUAL_MCP_IDLE_TIMEOUT_MS
 
 LM_VISUAL_MCP_AGY_COMMAND / _MODEL / _EFFORT
 LM_VISUAL_MCP_CODEX_COMMAND / _MODEL / _EFFORT
@@ -371,6 +386,13 @@ scale; strict range enforcement is not yet implemented.
 - **AGY**: stages images in an added directory, invokes `agy` with `--sandbox`, and discovers
   image capability from the real request. Headless image access can be non-deterministic, so
   failures may fall back to the next provider.
+  The server invokes AGY headless (`-p`, non-interactive print mode), in which AGY **cannot
+  prompt** for tool-permission confirmation and therefore **auto-denies** any tool action that
+  would normally require one. AGY's own settings file (`~/.gemini/antigravity-cli/settings.json`)
+  must set `"toolPermission": "proceed-in-sandbox"` and `"enableTerminalSandbox": true` so
+  tool actions are auto-approved while still confined to the sandbox the server runs AGY in
+  (`--sandbox`). Without these, AGY's headless run rejects the tool actions and the request
+  falls back to the next provider.
 - **Codex**: uses repeated `-i`, a read-only sandbox, and `--output-schema`.
 - **Gemini**: uses `google-genai`, structured JSON, and multiple image parts.
 - **OpenCode**: uses repeated `--file` and parses the JSON event stream.
@@ -382,22 +404,16 @@ CLI version compatibility is not currently pinned; run `doctor` after upgrading 
 The safe deployment model is a trusted, single-user machine with both listeners bound to
 `127.0.0.1`.
 
-- Do not expose daemon port 6506 or proxy port 8787 to a LAN or the public internet.
-- The daemon `/tool` endpoint has no authentication.
+- Do not expose lm-vision-server port 6506 or lm-proxy port 8787 to a LAN or the public
+  internet.
+- The lm-vision-server `/tool` endpoint has no authentication.
 - The proxy forwards Authorization/API-key headers to the upstream encoded in its path and can
-  fetch HTTP(S) image URLs. It does not yet enforce an upstream allowlist or block private-network
-  image targets, so an exposed proxy would create SSRF and credential-forwarding risk.
-- data URL and Anthropic base64 images do not yet receive the same complete size validation as
-  downloaded images.
+  fetch HTTP(S) image URLs. An exposed proxy therefore creates SSRF and credential-forwarding
+  risk; there is no configurable upstream allowlist or private-network policy yet.
 - MCP local-path tools can read paths supplied by the caller; only trusted agents should have
   access to this server.
 - Avoid plain API keys in YAML. The code avoids intentionally logging keys, but complete
   value-based log redaction is not implemented yet.
-
-The original MCP and proxy requirements remain in [`mcp_plan.md`](mcp_plan.md) and
-[`proxy_plan.md`](proxy_plan.md). Current repository-wide findings, risk levels, and remediation
-priorities are in [`code_review.md`](code_review.md); Auto classifier wire details are in
-[`classifier_compatibility.md`](classifier_compatibility.md).
 
 ## Current limitations
 
@@ -409,8 +425,6 @@ priorities are in [`code_review.md`](code_review.md); Auto classifier wire detai
 - Proxy targets and remote image URLs have no configurable allowlist/private-network policy.
 - Windows `stop`/`restart` process discovery is incomplete.
 - Numeric configuration values are not yet range-validated.
-- A dependency warning about an unresolved Pydantic forward reference may appear in MCP smoke
-  tests; it does not currently fail the suite.
 
 ## Development
 
@@ -418,14 +432,8 @@ priorities are in [`code_review.md`](code_review.md); Auto classifier wire detai
 .venv/bin/python -m pytest -q
 ```
 
-The audited baseline is 118 passing tests when the environment allows binding temporary
-loopback ports. In restricted sandboxes, socket-based daemon/proxy tests can fail with
-`PermissionError` even though non-network tests pass.
-
-`mcp_plan.md` and `proxy_plan.md` retain their original requirements and history. Current audit
-results are recorded in [`code_review.md`](code_review.md); completed Auto classifier work, wire
-evidence, and risk boundaries are documented in
-[`classifier_compatibility.md`](classifier_compatibility.md).
+The suite binds temporary loopback ports; in restricted sandboxes, socket-based
+server/proxy tests can fail with `PermissionError` even though non-network tests pass.
 
 ## Troubleshooting
 
