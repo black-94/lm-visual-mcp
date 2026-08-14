@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import quote
 
@@ -51,6 +53,15 @@ _HOP = {
     "host",
 }
 
+# aiohttp's Application default is 1MB; a single vision request can carry
+# several base64 images well past that. Raise the ceiling so uploads are not
+# dropped by the framework (media size is bounded separately by the config).
+_MAX_BODY_BYTES = 100 * 1024 * 1024
+
+# Disk log rotation: keep the tail of the proxy log, not unbounded growth.
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUP_COUNT = 3
+
 
 class ProxyError(Exception):
     def __init__(self, status: int, message: str) -> None:
@@ -86,7 +97,7 @@ class VisionProxyApp:
 
     # -- aiohttp -----------------------------------------------------------
     def build(self) -> web.Application:
-        app = web.Application()
+        app = web.Application(client_max_size=_MAX_BODY_BYTES)
         app.router.add_get("/health", self.health)
         app.router.add_route("*", "/{tail:.*}", self.handle)
         app.on_cleanup.append(self._close)
@@ -117,11 +128,13 @@ class VisionProxyApp:
         proto, target, suffix = self._parse_target(request.path)
         adapter = self._adapters.get(proto)
         body = await request.read()
+        model = _model_of(body)
         classifier_request = proto == "anthropic" and is_auto_classifier_request(body)
         classifier_stage1 = classifier_request and is_auto_classifier_stage1_request(body)
         if classifier_request and self.cfg.proxy.classifier.disable_thinking:
             body, _ = disable_auto_classifier_thinking(body)
         if adapter is None or not adapter.has_image(body):
+            _entry_log(proto, model, len(body), 0, "RAW")
             return await self._forward(
                 request,
                 target,
@@ -134,6 +147,7 @@ class VisionProxyApp:
             extracted = adapter.extract(body, self.media)
         except Exception as exc:  # noqa: BLE001 - fall back to transparent
             logger.warning("proxy parse failed for %s; forwarding raw: %s", proto, exc)
+            _entry_log(proto, model, len(body), 0, "RAW")
             return await self._forward(
                 request,
                 target,
@@ -142,6 +156,7 @@ class VisionProxyApp:
                 classifier_stage1,
             )
         if not extracted.slots:
+            _entry_log(proto, model, len(body), 0, "RAW")
             return await self._forward(
                 request,
                 target,
@@ -150,6 +165,7 @@ class VisionProxyApp:
                 classifier_stage1,
             )
 
+        _entry_log(proto, model, len(body), len(extracted.slots), "REWRITTEN")
         descs = await self._describe_cached(extracted.slots)
         for slot, desc in zip(extracted.slots, descs):
             slot.apply(desc)
@@ -215,9 +231,10 @@ class VisionProxyApp:
             else:
                 missed.append(i)
         if missed:
-            results = await describe(
+            results, providers = await describe(
                 self.router, [slots[i].image for i in missed], self.cfg.runtime.timeout
             )
+            logger.info("DESCRIBE missed=%d providers=%s", len(missed), providers)
             for k, i in enumerate(missed):
                 txt = results[k] if k < len(results) else ""
                 descs[i] = txt
@@ -259,6 +276,16 @@ class VisionProxyApp:
         ) as resp:
             resp_headers = _passthrough_headers(resp.headers)
             resp_headers.pop("Content-Length", None)  # streamed; aiohttp frames it
+            logger.info("UPSTREAM %s %s -> %d", request.method, url, resp.status)
+            if resp.status >= 400:
+                raw = await resp.content.read()
+                logger.info(
+                    "UPSTREAM ERROR %d url=%s body=%s",
+                    resp.status,
+                    url,
+                    _truncate_text(raw, 1200),
+                )
+                return web.Response(status=resp.status, headers=resp_headers, body=raw)
             if (
                 normalize_classifier_stage1
                 and resp.status == 200
@@ -291,6 +318,7 @@ def run_proxy(cfg: AppConfig) -> int:
     detected and exits quietly with rc 0 — the existing proxy keeps serving and
     concurrent MCP launches all connect to the winner (singleton).
     """
+    _setup_proxy_logging()
     runner = web.AppRunner(VisionProxyApp(cfg).build())
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -382,3 +410,58 @@ def _host_of(target: str) -> str:
 
 def _pad(b64: str) -> str:
     return b64 + "=" * (-len(b64) % 4)
+
+
+def _model_of(body: bytes) -> str:
+    """Best-effort extraction of the request ``model`` for the entry log."""
+    try:
+        doc = json.loads(body)
+    except Exception:  # noqa: BLE001 - non-JSON body
+        return "?"
+    model = doc.get("model") if isinstance(doc, dict) else None
+    return str(model) if model else "?"
+
+
+def _truncate_text(raw: bytes, limit: int) -> str:
+    """Decode upstream error bytes to text, truncated to ``limit`` chars."""
+    text = raw.decode("utf-8", errors="replace")
+    if len(text) > limit:
+        text = text[:limit] + f"...({len(raw)} bytes)"
+    return text
+
+
+def _entry_log(proto: str, model: str, length: int, images: int, direction: str) -> None:
+    logger.info(
+        "REQ proto=%s model=%s len=%d images=%d -> %s",
+        proto,
+        model,
+        length,
+        images,
+        direction,
+    )
+
+
+def _setup_proxy_logging() -> None:
+    """Send the proxy's ``lm_visual_mcp.proxy`` logs to a rotating disk file.
+
+    The proxy is detached (stderr usually DEVNULL), so a console handler is
+    useless here. Best-effort: if the cache dir cannot be created, fall back to
+    whatever handlers exist rather than crashing the proxy.
+    """
+    try:
+        log_dir = Path("~/.cache/lm-visual-mcp").expanduser()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            str(log_dir / "proxy.log"),
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        root = logging.getLogger("lm_visual_mcp")
+        root.handlers = [handler]
+        root.setLevel(logging.INFO)
+    except OSError:
+        logger.warning("proxy disk logging unavailable; continuing without it")

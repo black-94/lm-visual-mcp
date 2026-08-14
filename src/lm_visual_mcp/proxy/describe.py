@@ -27,13 +27,17 @@ _DESCRIBE_USER = (
 )
 
 
-async def describe(router: ProviderRouter, images: list[ImageInput], timeout: float) -> list[str]:
+async def describe(
+    router: ProviderRouter, images: list[ImageInput], timeout: float
+) -> tuple[list[str], str]:
     """Run one vision request over ``images`` and return per-image descriptions.
 
-    The returned list is aligned with ``images`` (padded/truncated to match).
+    Returns ``(descriptions, provider_chain)``. The list is aligned with
+    ``images`` (padded/truncated to match); the provider chain is a short
+    observability string (e.g. ``"codex"`` or ``"codex+2fb"``).
     """
     if not images:
-        return []
+        return [], ""
     request = VisionRequest(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=_DESCRIBE_USER,
@@ -42,11 +46,16 @@ async def describe(router: ProviderRouter, images: list[ImageInput], timeout: fl
         timeout=timeout,
     )
     routed = await router.route(request)
+    provider_chain = routed.provider
+    fallbacks = getattr(routed, "fallbacks", []) or []
+    if fallbacks:
+        provider_chain = f"{provider_chain}+{len(fallbacks)}fb"
     arr = (routed.result.get("details") or {}).get("images")
     if not isinstance(arr, list):
         arr = [routed.result.get("answer") or routed.result.get("summary") or ""]
     # Align to the number of images, never guessing content.
-    return [_coerce(arr[k]) if k < len(arr) else "" for k in range(len(images))]
+    descs = [_coerce(arr[k]) if k < len(arr) else "" for k in range(len(images))]
+    return descs, provider_chain
 
 
 def _coerce(value) -> str:
