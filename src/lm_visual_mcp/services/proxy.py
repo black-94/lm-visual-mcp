@@ -15,9 +15,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -50,18 +52,27 @@ def probe_proxy(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
-def _spawn_detached(cmd: list[str]) -> bool:
+def _spawn_detached(cmd: list[str], log_name: str = "service") -> bool:
     """Launch ``cmd`` as a detached background process.
 
     On POSIX, ``start_new_session`` detaches it into its own session so it
     survives the spawning client's exit. On Windows, the same flag plus
     ``CREATE_NO_WINDOW`` keeps the child console-less and in its own process
     group (no flashing console; survives the client's console close).
+
+    stdout/stderr are redirected to a per-service log file (not DEVNULL) so the
+    background process's pre-detach noise (and any crash before its own
+    ``_setup_server_logging`` swaps the root logger) is not silently lost. The
+    file is truncated on each (re)spawn; the long-term log history lives in
+    ``~/.cache/lm-visual-mcp/{service,proxy}.log`` with size-based rotation.
     """
+    log_path = os.path.join(tempfile.gettempdir(), f"lm-visual-mcp-{log_name}.log")
+    logf = open(log_path, "wb")  # truncate: each run is its own paper trail
+    logger.info("spawning %s -> log %s", cmd, log_path)
     kwargs: dict = {
         "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": logf,
+        "stderr": logf,
         "start_new_session": True,
     }
     if platform.system() == "Windows":
@@ -92,7 +103,7 @@ def start_proxy(
     cmd = [sys.executable, "-m", "lm_visual_mcp", "proxy"]
     if config_path:
         cmd += ["--config", config_path]
-    if not _spawn_detached(cmd):
+    if not _spawn_detached(cmd, log_name="proxy"):
         return False
 
     deadline = time.monotonic() + max_wait
@@ -120,7 +131,7 @@ def start_server(
     cmd = [sys.executable, "-m", "lm_visual_mcp", "server"]
     if config_path:
         cmd += ["--config", config_path]
-    if not _spawn_detached(cmd):
+    if not _spawn_detached(cmd, log_name="server"):
         return False
 
     deadline = time.monotonic() + max_wait

@@ -51,6 +51,7 @@ class ProviderRouter:
         fallback_on = self.cfg.fallback.reasons()
         fallbacks: list[FallbackRecord] = []
         start = time.monotonic()
+        logger.info("router.route start, provider order=%s (images=%d)", self.order, len(request.images))
 
         for name in self.order:
             provider = self.registry[name]
@@ -64,9 +65,18 @@ class ProviderRouter:
                     break
                 continue
 
+            at = time.monotonic()
             try:
+                logger.info("provider %s analyze start (model=%s)", name, provider.model)
                 result = await provider.analyze(request)
+                logger.info(
+                    "provider %s analyze ok in %.0fms", name, (time.monotonic() - at) * 1000.0
+                )
             except ProviderUnavailableError as exc:
+                logger.warning(
+                    "provider %s analyze FAILED in %.0fms: %s",
+                    name, (time.monotonic() - at) * 1000.0, exc.message,
+                )
                 if not fallback_enabled or not exc.is_fallback_eligible(fallback_on):
                     raise
                 fallbacks.append(FallbackRecord(name, exc.reason.value, exc.message))

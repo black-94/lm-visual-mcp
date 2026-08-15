@@ -9,7 +9,6 @@ the result in the standard MCP response envelope.
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 from typing import Optional
 
@@ -20,8 +19,6 @@ from ..prompts import get_system_prompt
 from ..router import ProviderRouter, RoutedResponse
 from ..schema import VISION_RESULT_SCHEMA
 from ..services import MediaService, Workspace, WorkspaceManager
-
-logger = logging.getLogger("lm_visual_mcp.tools")
 
 
 class VisionSession:

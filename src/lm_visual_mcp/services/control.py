@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,10 @@ from .. import __version__
 from ..config import AppConfig
 
 logger = logging.getLogger("lm_visual_mcp.control")
+
+#: Cap each rotated server log at 5 MiB; keep 3 backups (≈20 MiB total).
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUP_COUNT = 3
 
 #: Where the lm-vision-server writes its PID (used for diagnosis / cleanup).
 DEFAULT_PIDFILE = Path("~/.cache/lm-visual-mcp/lm-visual-mcp-server.pid").expanduser()
@@ -192,7 +197,11 @@ class ToolServer:
         self.port = port
         # Test seam: override to inject a VisionSession wired to a fake router.
         self.session_factory = session_factory or self._default_session
-        self.loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        # The event loop is created lazily in serve() (post-fork). Creating it
+        # here would happen before detach()'s double-fork, after which the
+        # loop's selector/kqueue fd is stale and run_forever() dies with
+        # "Bad file descriptor" — leaving every /tool call stuck until timeout.
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._session: Optional[VisionSession] = None
         self._server: Optional[ThreadingHTTPServer] = None
         self._ready = threading.Event()
@@ -224,6 +233,10 @@ class ToolServer:
 
     def serve(self) -> None:
         assert self._server is not None
+        # Create the loop here (post-fork in the final child) so its selector
+        # fd is valid — see __init__ comment re: detach()'s double-fork.
+        assert self.loop is None, "serve() must be called once"
+        self.loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop_main, name="server-loop", daemon=True).start()
         # Serve immediately; the session is built concurrently in the loop
         # thread and /tool handlers wait for it via the ``session`` property.
@@ -240,9 +253,14 @@ class ToolServer:
 
     def _loop_main(self) -> None:
         asyncio.set_event_loop(self.loop)
+        t0 = time.monotonic()
         self._session = self.session_factory(self.cfg)
+        logger.info("VisionSession ready in %.2fs", time.monotonic() - t0)
         self._ready.set()
-        self.loop.run_forever()
+        try:
+            self.loop.run_forever()
+        except Exception as exc:  # noqa: BLE001 - surface why the loop dies
+            logger.exception("loop thread: run_forever raised: %r", exc)
 
     # -- tool dispatch -----------------------------------------------------
     async def run_tool(self, payload: dict) -> dict:
@@ -256,6 +274,10 @@ class ToolServer:
         image_sources = payload.get("image_sources") or []
         video_sources = payload.get("video_sources") or []
         output_type = payload.get("output_type")
+        logger.info(
+            "run_tool tool=%s images=%d user_prompt=%r",
+            tool, len(image_sources), (user_prompt or "")[:80],
+        )
 
         if video_sources:
             return await self.session.analyze_video(
@@ -290,7 +312,12 @@ def _setup_server_logging(log_dir: Path) -> None:
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "lm-vision-server.log"
-        handler = logging.FileHandler(str(log_file), encoding="utf-8")
+        handler = RotatingFileHandler(
+            str(log_file),
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )

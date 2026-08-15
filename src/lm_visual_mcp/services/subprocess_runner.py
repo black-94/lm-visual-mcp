@@ -8,13 +8,17 @@ shell-escaping is needed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from ..errors import ProviderError, ProviderUnavailableError
 from ..models import ProviderFailureReason
+
+logger = logging.getLogger("lm_visual_mcp.subprocess")
 
 
 @dataclass
@@ -49,6 +53,20 @@ class SubprocessRunner:
             )
 
         cmd = [str(resolved), *invocation.args]
+        # Redact: log exe + arg count + first-arg hash (the user_prompt is the
+        # second argv entry for `-p`, so it lives at index 1). Hashing avoids
+        # leaking prompt text while still correlating requests in the log.
+        import hashlib
+        prompt_hash = hashlib.sha256((invocation.args[1] if len(invocation.args) > 1 else "").encode("utf-8")).hexdigest()[:8]
+        logger.info(
+            "CMD %s argv=%d prompt_sha256=%s timeout=%.1fs cwd=%s",
+            str(resolved),
+            len(invocation.args),
+            prompt_hash,
+            invocation.timeout,
+            invocation.cwd or "inherit",
+        )
+        t0 = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -79,6 +97,25 @@ class SubprocessRunner:
             except Exception:  # noqa: BLE001
                 stdout_bytes, stderr_bytes = b"", b""
             timed_out = True
+
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        logger.info(
+            "OK  %s rc=%s elapsed=%.0fms timed_out=%s stdout=%dB stderr=%dB",
+            str(resolved),
+            proc.returncode if proc.returncode is not None else -1,
+            elapsed_ms,
+            timed_out,
+            len(stdout_bytes or b""),
+            len(stderr_bytes or b""),
+        )
+        if timed_out:
+            logger.warning(
+                "TIMEOUT %s after %.1fs (timeout=%.1fs) stderr=%s",
+                str(resolved),
+                elapsed_ms / 1000.0,
+                invocation.timeout,
+                ((stderr_bytes or b"").decode("utf-8", errors="replace"))[-500:],
+            )
 
         return SubprocessResult(
             command=str(resolved),
