@@ -24,6 +24,7 @@ AGY call.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -48,9 +49,16 @@ class AgyProvider(CliProvider):
         effort: Optional[str] = None,
         timeout: float = 120.0,
         runner=None,
+        vision_cache_ttl: float = 300.0,
     ) -> None:
         super().__init__(command=command, model=model, effort=effort, timeout=timeout, runner=runner)
         self._vision_capability: Optional[str] = None
+        # Monotonic timestamp of when "unsupported" was last cached. When it ages
+        # past ``vision_cache_ttl`` the poison expires and analyze() retries AGY
+        # with a real call (so a transient permission issue doesn't permanently
+        # exile AGY and push 100% of load onto the fallback providers).
+        self._vision_unsupported_at: Optional[float] = None
+        self.vision_cache_ttl = vision_cache_ttl
 
     # -- probe -------------------------------------------------------------
     async def check_vision_capability(self, request: Optional[VisionRequest]) -> str:
@@ -65,7 +73,15 @@ class AgyProvider(CliProvider):
         """
         if request is None or (not request.images and not request.videos):
             return "unknown"
+        if self._cache_is_fresh():
+            return "unsupported"
         return self._vision_capability or "unknown"
+
+    def _cache_is_fresh(self) -> bool:
+        """True only while the cached "unsupported" verdict is still within TTL."""
+        if self._vision_capability != "unsupported" or self._vision_unsupported_at is None:
+            return False
+        return (time.monotonic() - self._vision_unsupported_at) < self.vision_cache_ttl
 
     @staticmethod
     def _looks_unsupported(result: SubprocessResult) -> bool:
@@ -87,7 +103,7 @@ class AgyProvider(CliProvider):
         # non-deterministic in headless mode; a runtime failure surfaces in
         # parse_output as UNSUPPORTED_MEDIA and caches here so subsequent image
         # requests fail fast while the router falls back to the next provider.
-        if (request.images or request.videos) and self._vision_capability == "unsupported":
+        if (request.images or request.videos) and self._cache_is_fresh():
             raise ProviderUnavailableError(
                 ProviderFailureReason.UNSUPPORTED_MEDIA,
                 "agy headless cannot read images (tool permission auto-denied)",
@@ -145,10 +161,18 @@ class AgyProvider(CliProvider):
     def parse_output(self, result: SubprocessResult, request: VisionRequest) -> dict:
         if (request.images or request.videos) and self._looks_unsupported(result):
             self._vision_capability = "unsupported"
+            self._vision_unsupported_at = time.monotonic()
             raise ProviderUnavailableError(
                 ProviderFailureReason.UNSUPPORTED_MEDIA,
                 "agy headless cannot read images (command-tool permission auto-denied)",
             )
+        # A real AGY call produced output -> vision works, so clear any stale
+        # "unsupported" verdict (records the recovery so fail-fast resumes on
+        # the next genuine failure rather than an expired one).
+        if self._vision_capability == "unsupported":
+            logger.info("agy vision capability recovered; clearing unsupported cache")
+            self._vision_capability = None
+            self._vision_unsupported_at = None
         if result.returncode != 0:
             reason = self._classify(result)
             raise ProviderUnavailableError(reason, f"agy exited with rc={result.returncode}")

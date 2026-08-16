@@ -84,10 +84,52 @@ def test_agy_unsupported_media_raises():
     ok = SubprocessResult("/usr/bin/agy", [], 0, "{}", "")
     p = AgyProvider(command="agy", runner=FakeRunner(ok))
     p._vision_capability = "unsupported"
+    p._vision_unsupported_at = __import__("time").monotonic()
     with pytest.raises(ProviderUnavailableError) as ei:
         import asyncio
         asyncio.run(p.analyze(_req()))
     assert ei.value.reason == ProviderFailureReason.UNSUPPORTED_MEDIA
+
+
+def test_agy_unsupported_cache_expires_and_retries():
+    # After the TTL elapses, a stale "unsupported" verdict must NOT fail fast:
+    # analyze() runs a real AGY call again. This is the fix that stops a
+    # transient permission denial from permanently exiling AGY.
+    ok = SubprocessResult(
+        "/usr/bin/agy", [], 0,
+        '{"status":"SUCCESS","structured_output":{"answer":"hi"}}', "",
+    )
+    p = AgyProvider(command="agy", runner=FakeRunner(ok), vision_cache_ttl=0.1)
+    p._vision_capability = "unsupported"
+    p._vision_unsupported_at = __import__("time").monotonic() - 10.0  # expired
+    import asyncio
+    res = asyncio.run(p.analyze(_req()))
+    assert res.result["answer"] == "hi"
+    # The successful real call cleared the stale poison.
+    assert p._vision_capability is None
+    assert p._vision_unsupported_at is None
+
+
+def test_agy_unsupported_refreshes_ttl_on_real_failure():
+    # An expired cache that runs AGY again and hits "no output produced" again
+    # re-poisons with a fresh timestamp, so fail-fast resumes.
+    denied = SubprocessResult(
+        "/usr/bin/agy", [], 0, "",
+        'jetski: no output produced — a tool required the "read_file" permission '
+        'that headless mode cannot prompt for, so it was auto-denied.',
+    )
+    p = AgyProvider(command="agy", runner=FakeRunner(denied), vision_cache_ttl=0.1)
+    p._vision_capability = "unsupported"
+    p._vision_unsupported_at = __import__("time").monotonic() - 10.0  # expired
+    import asyncio
+    with pytest.raises(ProviderUnavailableError):
+        asyncio.run(p.analyze(_req()))
+    assert p._vision_capability == "unsupported"
+    assert p._vision_unsupported_at is not None
+    # Fresh timestamp -> fail-fast on the very next request without another AGY call.
+    with pytest.raises(ProviderUnavailableError):
+        asyncio.run(p.analyze(_req()))
+    assert len(p.runner.calls) == 1
 
 
 def test_agy_check_vision_capability_does_not_invoke_agy():

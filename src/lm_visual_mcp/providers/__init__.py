@@ -30,6 +30,7 @@ def build_provider(name: str, provider_cfg: ProviderConfig, cfg: AppConfig, runn
         return AgyProvider(
             command=provider_cfg.command, model=provider_cfg.model, effort=effort,
             timeout=timeout, runner=runner,
+            vision_cache_ttl=provider_cfg.vision_cache_ttl,
         )
     if name == "codex":
         return CodexProvider(

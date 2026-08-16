@@ -43,6 +43,9 @@ class ProviderConfig(pd.BaseModel):
     api_key_env: Optional[str] = None
     # Plain-text compatibility key. Redacted. Prefer api_key_env.
     api_key: pd.SecretStr | None = pd.Field(default=None)
+    # Seconds to keep a "vision unsupported" verdict cached before AGY is retried
+    # with a real call. AGY-only; ignored by the other providers.
+    vision_cache_ttl: float = 300.0
 
     def effective_api_key(self) -> Optional[str]:
         """Resolve the API key, never leaking it.

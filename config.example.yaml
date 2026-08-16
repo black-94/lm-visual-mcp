@@ -12,6 +12,10 @@ providers:
     command: agy
     model: gemini-3.6-flash
     effort: high
+    # Seconds to keep an "unsupported" verdict cached before AGY is retried with
+    # a real call. Prevents a transient permission issue from permanently
+    # pushing all image load onto the fallback providers.
+    vision_cache_ttl: 300
 
   codex:
     enabled: true
