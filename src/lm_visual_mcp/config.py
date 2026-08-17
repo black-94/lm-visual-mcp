@@ -1,12 +1,18 @@
-"""Server configuration.
+"""Unified configuration (schema version 2).
 
 Priority (highest first):
 
     CLI argument  >  Environment variable  >  Config file  >  Built-in default
 
-API keys are referenced by environment-variable *name* (``api_key_env``), never
-embedded as plain text — though plain ``SecretStr`` keys are accepted for
-compatibility and are strictly redacted everywhere.
+The configuration has no ``mcp:`` section by design: the only MCP-level
+decision - whether the MCP process should start the shared server - is passed
+by the agent's MCP config as a CLI argument (``--start-server`` /
+``--no-start-server``) or env var, not by this file. All listen addresses live
+under ``server:``.
+
+API keys are referenced by environment-variable *name* (``api_key_env``),
+never embedded as plain text - though plain ``SecretStr`` keys are accepted
+for compatibility and are strictly redacted everywhere.
 """
 
 from __future__ import annotations
@@ -19,9 +25,9 @@ import pydantic as pd
 import yaml
 
 from .errors import ConfigError
-from .models import DEFAULT_PROVIDER_ORDER, ProviderFailureReason
+from .vision.types import ProviderFailureReason
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 
 # Default config file search paths (first existing wins).
 DEFAULT_CONFIG_CANDIDATES = (
@@ -34,56 +40,46 @@ DEFAULT_CONFIG_CANDIDATES = (
 PREFIX = "LM_VISUAL_MCP_"
 
 
-class ProviderConfig(pd.BaseModel):
-    enabled: bool = True
-    command: Optional[str] = None
-    model: Optional[str] = None
-    effort: Optional[str] = None  # Reasoning effort: low | medium | high | xhigh (provider-dependent)
-    # Only meaningful for API-based providers (gemini).
-    api_key_env: Optional[str] = None
-    # Plain-text compatibility key. Redacted. Prefer api_key_env.
-    api_key: pd.SecretStr | None = pd.Field(default=None)
-    # Seconds to keep a "vision unsupported" verdict cached before AGY is retried
-    # with a real call. AGY-only; ignored by the other providers.
-    vision_cache_ttl: float = 300.0
+class RateLimitConfig(pd.BaseModel):
+    """Per-provider rate limit. Either or both may be set; None disables."""
 
-    def effective_api_key(self) -> Optional[str]:
+    rpm: Optional[int] = None
+    concurrency: Optional[int] = None
+
+
+class ProviderEntryConfig(pd.BaseModel):
+    """One entry in the provider chain (list order = fallback order)."""
+
+    name: str
+    # Registry key into the provider registry - decouples config from classes.
+    type: str
+    enabled: bool = True
+    command: Optional[str] = None  # CLI-based providers
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    # API-based providers.
+    api_key_env: Optional[str] = None
+    api_key: Optional[pd.SecretStr] = None
+    base_url: Optional[str] = None
+    timeout: Optional[float] = None
+    # Seconds to keep an "unsupported" verdict cached (agy only).
+    vision_cache_ttl: float = 300.0
+    sandbox: str = "read-only"  # codex only
+    rate_limit: RateLimitConfig = pd.Field(default_factory=RateLimitConfig)
+
+    def effective_api_key(self, default_env: Optional[str] = None) -> Optional[str]:
         """Resolve the API key, never leaking it.
 
-        Order: explicit config key > api_key_env env-var.
+        Order: explicit config key > api_key_env env-var > type default env-var.
         """
         if self.api_key is not None:
             return self.api_key.get_secret_value()
-        if self.api_key_env:
-            val = os.environ.get(self.api_key_env)
+        env_name = self.api_key_env or default_env
+        if env_name:
+            val = os.environ.get(env_name)
             if val:
                 return val
         return None
-
-
-class ProvidersConfig(pd.BaseModel):
-    order: list[str] = pd.Field(default_factory=lambda: list(DEFAULT_PROVIDER_ORDER))
-    agy: ProviderConfig = pd.Field(default_factory=lambda: ProviderConfig(command="agy"))
-    codex: ProviderConfig = pd.Field(default_factory=lambda: ProviderConfig(command="codex"))
-    gemini: ProviderConfig = pd.Field(default_factory=lambda: ProviderConfig(api_key_env="GEMINI_API_KEY"))
-    opencode: ProviderConfig = pd.Field(default_factory=lambda: ProviderConfig(command="opencode"))
-
-    def get(self, name: str) -> Optional[ProviderConfig]:
-        return getattr(self, name, None)
-
-    def names(self) -> list[str]:
-        return [k for k in self.model_dump().keys() if k != "order"]
-
-
-class RuntimeConfig(pd.BaseModel):
-    workdir: Optional[str] = None
-    timeout: float = 120.0
-    max_concurrency: int = 2
-    # Singleton (global single-instance) transport settings. The shared
-    # lm-vision-server binds this host/port; every Claude Code session proxies
-    # to it. Requests beyond ``max_concurrency`` queue inside the server.
-    host: str = "127.0.0.1"
-    port: int = 6506
 
 
 class FallbackConfig(pd.BaseModel):
@@ -96,9 +92,51 @@ class FallbackConfig(pd.BaseModel):
         return set(self.on)
 
 
+class VisionConfig(pd.BaseModel):
+    timeout: float = 120.0
+    max_concurrency: int = 2
+    workdir: Optional[str] = None
+    fallback: FallbackConfig = pd.Field(default_factory=FallbackConfig)
+    providers: list[ProviderEntryConfig] = pd.Field(
+        default_factory=lambda: [
+            ProviderEntryConfig(name="agy", type="agy", command="agy"),
+            ProviderEntryConfig(name="codex", type="codex", command="codex"),
+            ProviderEntryConfig(
+                name="gemini", type="gemini", api_key_env="GEMINI_API_KEY"
+            ),
+            ProviderEntryConfig(
+                name="opencode", type="opencode", api_key_env="OPENCODE_API_KEY"
+            ),
+        ]
+    )
+
+
+class ImageHookConfig(pd.BaseModel):
+    """Image request hook: rewrite image parts into text descriptions."""
+
+    enabled: bool = True
+
+
+class ClassifierHookConfig(pd.BaseModel):
+    """Claude Code Auto-mode classifier compatibility hook."""
+
+    enabled: bool = True
+    # Classifier output is a tiny XML verdict. Thinking blocks waste tokens and
+    # break some Claude Code parsers when returned before the text block.
+    disable_thinking: bool = True
+
+
+class ServerConfig(pd.BaseModel):
+    """The shared singleton server (vision endpoint + request hooks)."""
+
+    host: str = "127.0.0.1"
+    port: int = 8787
+    image_hook: ImageHookConfig = pd.Field(default_factory=ImageHookConfig)
+    classifier_hook: ClassifierHookConfig = pd.Field(default_factory=ClassifierHookConfig)
+
+
 class MediaConfig(pd.BaseModel):
     max_image_mb: float = 20.0
-    max_video_mb: float = 8.0
     download_timeout: float = 30.0
     max_download_mb: float = 32.0
 
@@ -107,44 +145,24 @@ class LoggingConfig(pd.BaseModel):
     level: str = "INFO"
 
 
-class ClassifierProxyConfig(pd.BaseModel):
-    """Claude Code Auto-mode classifier compatibility settings."""
-
-    # Classifier output is a tiny XML verdict. Thinking blocks waste tokens and
-    # break some Claude Code parsers when returned before the text block.
-    disable_thinking: bool = True
-
-
-class ProxyConfig(pd.BaseModel):
-    """Transparent vision-proxy HTTP listener configuration."""
-
-    host: str = "127.0.0.1"
-    port: int = 8787
-    classifier: ClassifierProxyConfig = pd.Field(default_factory=ClassifierProxyConfig)
-
-
 class AppConfig(pd.BaseModel):
     version: int = CONFIG_VERSION
-    providers: ProvidersConfig = pd.Field(default_factory=ProvidersConfig)
-    runtime: RuntimeConfig = pd.Field(default_factory=RuntimeConfig)
-    fallback: FallbackConfig = pd.Field(default_factory=FallbackConfig)
+    server: ServerConfig = pd.Field(default_factory=ServerConfig)
+    vision: VisionConfig = pd.Field(default_factory=VisionConfig)
     media: MediaConfig = pd.Field(default_factory=MediaConfig)
     logging: LoggingConfig = pd.Field(default_factory=LoggingConfig)
-    proxy: ProxyConfig = pd.Field(default_factory=ProxyConfig)
 
     def validate_all(self) -> None:
-        known = set(self.providers.names())
-        for name in self.providers.order:
-            if name not in known:
-                raise ConfigError(f"unknown provider in order: {name!r}")
-        if len(set(self.providers.order)) != len(self.providers.order):
-            raise ConfigError("providers.order contains duplicates")
+        from .vision.providers import PROVIDER_TYPES
 
-
-def _coerce_reason(value) -> ProviderFailureReason:
-    if isinstance(value, ProviderFailureReason):
-        return value
-    return ProviderFailureReason(str(value))
+        names = [e.name for e in self.vision.providers]
+        if len(set(names)) != len(names):
+            raise ConfigError("vision.providers contains duplicate names")
+        for entry in self.vision.providers:
+            if entry.type not in PROVIDER_TYPES:
+                raise ConfigError(
+                    f"unknown provider type {entry.type!r} (provider {entry.name!r})"
+                )
 
 
 class ConfigLoader:
@@ -214,63 +232,35 @@ class ConfigLoader:
         cfg.validate_all()
         return cfg
 
-    # -- env overrides -----------------------------------------------------
+    # -- env overrides -------------------------------------------------------
     def _apply_env(self, data: dict) -> None:
         env = self.env
         e = lambda key: env.get(f"{PREFIX}{key}")  # noqa: E731
 
-        if e("WORKDIR"):
-            data.setdefault("runtime", {})["workdir"] = e("WORKDIR")
+        server = data.setdefault("server", {})
+        if e("SERVER_HOST"):
+            server["host"] = e("SERVER_HOST")
+        if e("SERVER_PORT"):
+            server["port"] = int(e("SERVER_PORT"))
+        if e("IMAGE_HOOK"):
+            server.setdefault("image_hook", {})["enabled"] = _parse_bool(e("IMAGE_HOOK"))
+        if e("CLASSIFIER_HOOK"):
+            server.setdefault("classifier_hook", {})["enabled"] = _parse_bool(e("CLASSIFIER_HOOK"))
+
+        vision = data.setdefault("vision", {})
         if e("TIMEOUT"):
-            data.setdefault("runtime", {})["timeout"] = float(e("TIMEOUT"))
+            vision["timeout"] = float(e("TIMEOUT"))
         if e("MAX_CONCURRENCY"):
-            data.setdefault("runtime", {})["max_concurrency"] = int(e("MAX_CONCURRENCY"))
-        if e("HOST"):
-            data.setdefault("runtime", {})["host"] = e("HOST")
-        if e("PORT"):
-            data.setdefault("runtime", {})["port"] = int(e("PORT"))
-
-        for name in ("agy", "codex", "opencode"):
-            cmd = e(f"{name.upper()}_COMMAND")
-            model = e(f"{name.upper()}_MODEL")
-            effort = e(f"{name.upper()}_EFFORT")
-            if not (cmd or model or effort):
-                continue
-            provider = data.setdefault("providers", {}).setdefault(name, {})
-            if cmd:
-                provider["command"] = cmd
-            if model:
-                provider["model"] = model
-            if effort:
-                provider["effort"] = effort
-
-        # Only materialize the gemini section when an actual override exists;
-        # otherwise pydantic's default_factory (api_key_env="GEMINI_API_KEY")
-        # would be skipped, dropping the default key resolution.
-        gem = {
-            k: v
-            for k, v in (
-                ("model", e("GEMINI_MODEL")),
-                ("api_key", e("GEMINI_API_KEY")),
-                ("effort", e("GEMINI_EFFORT")),
-            )
-            if v
-        }
-        if gem:
-            data.setdefault("providers", {}).setdefault("gemini", {}).update(gem)
+            vision["max_concurrency"] = int(e("MAX_CONCURRENCY"))
+        if e("WORKDIR"):
+            vision["workdir"] = e("WORKDIR")
 
         if e("LOG_LEVEL"):
             data.setdefault("logging", {})["level"] = e("LOG_LEVEL")
 
-        proxy = data.setdefault("proxy", {})
-        if e("PROXY_HOST"):
-            proxy["host"] = e("PROXY_HOST")
-        if e("PROXY_PORT"):
-            proxy["port"] = int(e("PROXY_PORT"))
-        if e("PROXY_CLASSIFIER_DISABLE_THINKING"):
-            proxy.setdefault("classifier", {})["disable_thinking"] = _parse_bool(
-                e("PROXY_CLASSIFIER_DISABLE_THINKING")
-            )
+        media = data.setdefault("media", {})
+        if e("MAX_IMAGE_MB"):
+            media["max_image_mb"] = float(e("MAX_IMAGE_MB"))
 
 
 def _parse_bool(value: str) -> bool:

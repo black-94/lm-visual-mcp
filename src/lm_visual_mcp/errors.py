@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .models import ProviderFailureReason
+from .vision.types import ProviderFailureReason
 
 
 class VisionError(Exception):
@@ -51,7 +51,7 @@ class ProviderUnavailableError(ProviderError):
         # provider is pointless.
         self.operable = operable
 
-    def is_fallback_eligible(self, fallback_on: Optional[set[ProviderFailureReason]]) -> bool:
+    def is_fallback_eligible(self, fallback_on: Optional[set[ProviderFailureReason]] = None) -> bool:
         if fallback_on is None:
             return self.reason in ProviderFailureReason.fallback_eligible_defaults()
         return self.reason in fallback_on

@@ -1,10 +1,14 @@
-"""lm_visual_mcp — Vision MCP Server.
+"""lm_visual_mcp - Vision MCP Server.
 
 Give text-only LLMs / coding agents visual capabilities over the Model
-Context Protocol (MCP). All visual providers are routed behind a provider-neutral
-server policy driven by configuration.
+Context Protocol (MCP). Three modules:
+
+- ``vision``: image-recognition capability (provider chain + per-provider rate
+  limiting + fallback).
+- ``server``: the shared singleton server (vision endpoint + request hooks).
+- ``mcp``: the thin stdio MCP client presented to coding agents.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]

@@ -1,80 +1,95 @@
-version: 1
+version: 2
 
-providers:
-  order:
-    - agy
-    - codex
-    - gemini
-    - opencode
-
-  agy:
-    enabled: true
-    command: agy
-    model: gemini-3.6-flash
-    effort: high
-    # Seconds to keep an "unsupported" verdict cached before AGY is retried with
-    # a real call. Prevents a transient permission issue from permanently
-    # pushing all image load onto the fallback providers.
-    vision_cache_ttl: 300
-
-  codex:
-    enabled: true
-    command: codex
-    model: gpt-5.6-luna
-    effort: high
-
-  gemini:
-    enabled: true
-    model: gemini-3.6-flash
-    effort: high
-    api_key_env: GEMINI_API_KEY
-    # For compatibility only — prefer api_key_env / environment variable.
-    # api_key: "never-commit-a-plain-text-key"
-
-  opencode:
-    enabled: true
-    command: opencode
-    model: null
-    effort: null
-
-runtime:
-  workdir: null
-  timeout: 120
-  # Requests beyond this queue inside the shared lm-vision-server. Set to 1 for
-  # strict serial execution.
-  max_concurrency: 2
-  # Singleton transport: one shared lm-vision-server binds this host/port; every
-  # Claude Code session proxies to it. It stays running (always-on) until stopped.
+# The shared singleton server: vision endpoint + request hooks.
+# NOTE: there is no `mcp:` section - whether the MCP process should start the
+# server is decided by the agent's MCP config (`--start-server` (default) /
+# `--no-start-server` on the command, or LM_VISUAL_MCP_START_SERVER=0|1).
+server:
   host: 127.0.0.1
-  port: 6506
+  port: 8787
 
-fallback:
-  enabled: true
-  on:
-    - command_not_found
-    - not_authenticated
-    - permission_denied
-    - api_key_missing
-    - quota_exhausted
-    - unsupported_media
-    - timeout
-    - temporary_failure
+  # Image request hook: rewrite image blocks in proxied LLM requests into text
+  # descriptions (each rewritten block records the image's absolute local path).
+  image_hook:
+    enabled: true
+
+  # Claude Code Auto-classifier compatibility hook: disable thinking on
+  # classifier requests and normalize stage-1 verdict responses.
+  classifier_hook:
+    enabled: true
+    disable_thinking: true
+
+# Vision capability (image recognition only in this version).
+vision:
+  timeout: 120
+  # Requests beyond this queue inside the shared server.
+  max_concurrency: 2
+  # workdir: /path/to/dir   # default: per-request temp dirs
+
+  fallback:
+    enabled: true
+    on:
+      - command_not_found
+      - not_authenticated
+      - permission_denied
+      - api_key_missing
+      - quota_exhausted
+      - rate_limited
+      - unsupported_media
+      - timeout
+      - temporary_failure
+
+  # Provider chain: list order = fallback order. Each entry is {name, type};
+  # `type` is resolved through the provider registry (agy | codex | gemini |
+  # opencode), so multiple instances of one type are possible.
+  providers:
+    - name: agy
+      type: agy
+      enabled: true
+      command: agy
+      model: gemini-3.6-flash
+      effort: high
+      # Seconds to keep an "unsupported" verdict cached before AGY is retried.
+      vision_cache_ttl: 300
+      # Per-provider rate limiting: hitting either limit immediately downgrades
+      # this request to the next provider in the chain.
+      rate_limit:
+        rpm: 30
+        concurrency: 2
+
+    - name: codex
+      type: codex
+      enabled: true
+      command: codex
+      model: gpt-5.6-luna
+      effort: high
+      rate_limit:
+        rpm: 30
+
+    - name: gemini
+      type: gemini
+      enabled: true
+      model: gemini-3.6-flash
+      effort: high
+      api_key_env: GEMINI_API_KEY
+      # For compatibility only - prefer api_key_env / environment variable.
+      # api_key: "never-commit-a-plain-text-key"
+      rate_limit:
+        rpm: 60
+
+    - name: opencode
+      type: opencode
+      enabled: true
+      # Direct API access (OpenAI-compatible); no local opencode CLI needed.
+      base_url: https://opencode.ai/zen/v1
+      api_key_env: OPENCODE_API_KEY
+      rate_limit:
+        rpm: 30
 
 media:
   max_image_mb: 20
-  max_video_mb: 8
   download_timeout: 30
   max_download_mb: 32
 
 logging:
   level: INFO
-
-# Transparent vision proxy (lm-visual-mcp proxy). No image -> byte-level
-# passthrough; image present -> describe via the providers above and rewrite.
-proxy:
-  host: 127.0.0.1
-  port: 8787
-  classifier:
-    # Claude Code Auto classifier needs only a short XML verdict. Disable
-    # reasoning by default; set false for models that reject type=disabled.
-    disable_thinking: true

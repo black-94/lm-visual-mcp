@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lm-visual-mcp"
-version = "0.1.0"
-description = "Vision MCP Server: give text-only LLMs / coding agents visual capabilities via MCP."
+version = "0.2.0"
+description = "Vision MCP Server: give text-only LLMs / coding agents image-recognition capabilities via MCP (mcp / server / vision modules)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

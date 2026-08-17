@@ -1,13 +1,18 @@
-"""Command-line interface: run the MCP server, doctor, --version.
+"""Command-line interface.
 
 All logging goes to stderr; stdout is reserved for the MCP stdio protocol.
+
+Default (no subcommand): the MCP stdio server. Whether it should also start
+the shared vision server is passed here - from the agent's MCP config - via
+``--start-server`` (default) / ``--no-start-server`` or
+``LM_VISUAL_MCP_START_SERVER=0|1``; the YAML config file has no say in it.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -16,6 +21,8 @@ from .config import load_config
 
 logger = logging.getLogger("lm_visual_mcp")
 
+_START_SERVER_ENV = "LM_VISUAL_MCP_START_SERVER"
+
 
 def _configure_logging(level: str) -> None:
     handler = logging.StreamHandler(sys.stderr)
@@ -23,24 +30,6 @@ def _configure_logging(level: str) -> None:
     root = logging.getLogger("lm_visual_mcp")
     root.handlers = [handler]
     root.setLevel(level.upper())
-    # Redact secrets from all logs.
-    _add_redaction_filter(root)
-
-
-def _add_redaction_filter(logger_: logging.Logger) -> None:
-    _secrets: list[str] = []
-
-    class Redact(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            msg = record.getMessage()
-            for secret in _secrets:
-                if secret and secret in msg:
-                    msg = msg.replace(secret, "[REDACTED]")
-            record.msg = msg
-            record.args = ()
-            return True
-
-    logger_.addFilter(Redact())
 
 
 def _add_common_args(parser, *, suppress_default: bool) -> None:
@@ -60,140 +49,112 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lm-visual-mcp", description="Vision MCP Server")
     _add_common_args(parser, suppress_default=False)
     parser.add_argument("--version", action="store_true", help="Print version and exit")
+    server_group = parser.add_mutually_exclusive_group()
+    server_group.add_argument(
+        "--start-server", dest="start_server", action="store_true",
+        help="Start the shared vision server if absent (default)",
+    )
+    server_group.add_argument(
+        "--no-start-server", dest="start_server", action="store_false",
+        help="Never start the shared server; only use an already-running one",
+    )
+    parser.set_defaults(start_server=None)
     sub = parser.add_subparsers(dest="command")
     doc = sub.add_parser("doctor", help="Inspect the environment / configuration")
     _add_common_args(doc, suppress_default=True)
     doc.add_argument("--probe", action="store_true",
                      help="Run a real AGY vision smoke test (requires Pillow + agy)")
-    server = sub.add_parser("server", help="Run as the shared single-instance lm-vision-server")
-    _add_common_args(server, suppress_default=True)
-    proxy = sub.add_parser("proxy", help="Run the transparent lm-proxy (HTTP)")
-    _add_common_args(proxy, suppress_default=True)
-    proxy.add_argument("--host", help="Listen host (overrides config / env)")
-    proxy.add_argument("--port", type=int, help="Listen port (overrides config / env)")
+    srv = sub.add_parser("server", help="Run the shared vision server (foreground)")
+    _add_common_args(srv, suppress_default=True)
     for action, help_text in (
-        ("start", "Ensure the lm-vision-server and lm-proxy singletons are running"),
-        ("stop", "Stop the lm-vision-server and lm-proxy singletons"),
-        ("restart", "Restart the lm-vision-server and lm-proxy singletons"),
+        ("start", "Ensure the shared vision server is running"),
+        ("stop", "Stop the shared vision server"),
+        ("restart", "Restart the shared vision server"),
     ):
         p = sub.add_parser(action, help=help_text)
         _add_common_args(p, suppress_default=True)
-        p.add_argument("--service", choices=["server", "proxy"],
-                       help="Target only this service (default: both)")
     return parser
 
 
-def _serve(cfg, config_path: Optional[str]) -> int:
-    """Client mode: probe the shared lm-vision-server, start it if absent, then proxy.
+def _serve(cfg, config_path: Optional[str], start_server: bool) -> int:
+    """Default command: MCP stdio server backed by the shared vision server."""
+    from .mcp import build_mcp, connect
 
-    Presents the normal stdio MCP server to Claude Code; every tool call is
-    forwarded over loopback HTTP to the one global server. The server and proxy
-    are probed and launched exactly once here; there is no runtime keep-alive.
-    """
-    from .server import build_server
-    from .services import (
-        ProxyVisionSession,
-        probe_server,
-        probe_proxy,
-        start_server,
-        start_proxy,
-    )
+    client = connect(cfg, config_path, start=start_server)
+    if client is None:
+        # Still serve MCP: every tool call answers with an actionable error
+        # envelope instead of failing the whole session.
+        from .mcp.client import RemoteVision
 
-    host, port = cfg.runtime.host, cfg.runtime.port
-    if not probe_server(host, port):
-        logger.info("no shared lm-vision-server on %s:%s; starting one", host, port)
-        if not start_server(cfg, config_path, host, port):
-            if not probe_server(host, port):
-                logger.error("could not start shared lm-vision-server on %s:%s", host, port)
-                return 1
-
-    # Ensure the transparent lm-proxy is up too (singleton). It serves the
-    # agent's text-model client; MCP vision tools still go through the server,
-    # so a proxy startup failure is logged but does not block serving.
-    phost, pport = cfg.proxy.host, cfg.proxy.port
-    if not probe_proxy(phost, pport):
-        logger.info("no lm-proxy on %s:%s; starting one", phost, pport)
-        if not start_proxy(cfg, config_path):
-            if not probe_proxy(phost, pport):
-                logger.error("could not start lm-proxy on %s:%s", phost, pport)
-
-    session = ProxyVisionSession(cfg, host, port)
-    mcp = build_server(cfg, session=session)
+        client = RemoteVision(cfg.server.host, cfg.server.port)
+    mcp = build_mcp(client)
     mcp.run(transport="stdio")
     return 0
 
 
 def doctor(cfg, *, probe: bool = False) -> int:
-    from .services import MediaService
-    from .providers import build_registry
-    from .router import ProviderRouter
+    from .server.lifecycle import probe_server
+    from .vision.providers import PROVIDER_TYPES
+    from .vision.router import VisionRouter
+    from .vision.service import VisionService
 
     print("Vision MCP")
     print()
-    print("Provider order:")
-    print("  " + " -> ".join(cfg.providers.order))
+    host, port = cfg.server.host, cfg.server.port
+    print(f"Server {host}:{port}: {'healthy' if probe_server(host, port) else 'not running'}")
+    print(f"  image_hook: {'enabled' if cfg.server.image_hook.enabled else 'disabled'}")
+    print(f"  classifier_hook: {'enabled' if cfg.server.classifier_hook.enabled else 'disabled'}")
     print()
-    for name in cfg.providers.order:
-        pc = cfg.providers.get(name)
-        if pc is None:
-            print(f"{name}: unknown")
-            continue
-        enabled = pc.enabled
-        print(name)
-        print(f"  enabled: {'yes' if enabled else 'no'}")
-        if name == "gemini":
-            import os
-            key = pc.effective_api_key() or os.environ.get("GEMINI_API_KEY")
+    print("Provider chain (fallback order):")
+    print("  " + " -> ".join(e.name for e in cfg.vision.providers if e.enabled))
+    print()
+    for entry in cfg.vision.providers:
+        print(f"{entry.name} (type={entry.type})")
+        print(f"  enabled: {'yes' if entry.enabled else 'no'}")
+        rl = entry.rate_limit
+        if rl.rpm is not None or rl.concurrency is not None:
+            print(f"  rate_limit: rpm={rl.rpm} concurrency={rl.concurrency}")
+        if entry.type == "gemini":
+            key = entry.effective_api_key("GEMINI_API_KEY")
             print(f"  API key: {'configured' if key else 'not configured'}")
-            print(f"  model: {pc.model or 'default'}")
-            print(f"  effort: {pc.effort or 'default'}")
+        elif entry.type == "opencode":
+            key = entry.effective_api_key("OPENCODE_API_KEY")
+            print(f"  API key: {'configured' if key else 'not configured'}")
+            print(f"  base_url: {entry.base_url or 'default'}")
         else:
-            exe = _which(pc.command)
+            exe = _which(entry.command or entry.type)
             print(f"  executable: {exe or 'not found'}")
-            print(f"  model: {pc.model or 'default'}")
-            print(f"  effort: {pc.effort or 'default'}")
-        if enabled and name == "agy" and probe:
-            _probe_agy(cfg, pc)
+        print(f"  model: {entry.model or 'default'}")
+        print(f"  effort: {entry.effort or 'default'}")
         print()
     print("Runtime")
-    print(f"  workdir: {cfg.runtime.workdir or 'temporary'}")
-    print(f"  timeout: {cfg.runtime.timeout}")
-    print(f"  max_concurrency: {cfg.runtime.max_concurrency}")
+    print(f"  workdir: {cfg.vision.workdir or 'temporary'}")
+    print(f"  timeout: {cfg.vision.timeout}")
+    print(f"  max_concurrency: {cfg.vision.max_concurrency}")
     print()
     print("Fallback")
-    print(f"  enabled: {cfg.fallback.enabled}")
-    print("  on: " + ", ".join(r.value for r in cfg.fallback.reasons()))
+    print(f"  enabled: {cfg.vision.fallback.enabled}")
+    print("  on: " + ", ".join(r.value for r in cfg.vision.fallback.reasons()))
+    if probe:
+        _probe_chain(cfg)
     return 0
 
 
-def _lifecycle(cfg, args) -> int:
-    """``start`` / ``stop`` / ``restart`` the server and proxy singletons."""
-    from .services.lifecycle import SERVICES, service_targets, start_service, stop_service
+def _probe_chain(cfg) -> None:
+    """Probe each configured provider's availability (no vision call)."""
+    import asyncio
 
-    names = [args.service] if args.service else list(SERVICES)
-    if args.command in ("stop", "restart"):
-        for name in reversed(names):  # proxy first, then server
-            _, port, pidfile = service_targets(cfg, name)
-            _report(stop_service(name, port, pidfile))
-    if args.command in ("start", "restart"):
-        for name in names:
-            _report(start_service(cfg, name, args.config))
-    return 0
+    from .vision.providers import build_chain
+    from .vision.router import VisionRouter
 
+    router = VisionRouter(build_chain(cfg.vision))
 
-def _report(res: dict) -> None:
-    line = f"{res['service']}: {res['status']}"
-    if res.get("port"):
-        line += f" (:{res['port']})"
-    print(line)
+    async def run():
+        return await router.status()
 
-
-def _apply_proxy_overrides(cfg, args) -> None:
-    """Apply ``lm-visual-mcp proxy --host/--port`` over the loaded config."""
-    if args.host:
-        cfg.proxy.host = args.host
-    if args.port:
-        cfg.proxy.port = args.port
+    for status in asyncio.run(run()):
+        state = "available" if status.available else f"unavailable ({status.message})"
+        print(f"  {status.name}: {state}")
 
 
 def _which(command: Optional[str]):
@@ -205,54 +166,6 @@ def _which(command: Optional[str]):
     if Path(command).is_file():
         return str(Path(command).resolve())
     return shutil.which(command)
-
-
-def _probe_agy(cfg, pc) -> None:
-    from .providers.agy import AgyProvider
-
-    try:
-        import PIL  # noqa: F401
-    except ImportError:
-        print("  agy vision probe: skipped (Pillow not installed)")
-        return
-    from .services.subprocess_runner import SubprocessRunner
-
-    provider = AgyProvider(command=pc.command, model=pc.model, timeout=cfg.runtime.timeout,
-                           runner=SubprocessRunner())
-
-    # Build a real test image and ask AGY to read it.
-    import tempfile
-    from PIL import Image, ImageDraw, ImageFont
-    from .models import ImageInput, VisionRequest
-
-    with tempfile.TemporaryDirectory() as td:
-        img = Image.new("RGB", (520, 100), "white")
-        d = ImageDraw.Draw(img)
-        try:
-            f = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 40)
-        except Exception:  # noqa: BLE001
-            f = ImageFont.load_default()
-        d.text((20, 20), "VISION_TEST_7391", fill="black", font=f)
-        path = f"{td}/test.png"
-        img.save(path)
-        req = VisionRequest(
-            system_prompt="You are a vision tester.",
-            user_prompt="Read the exact text shown in the supplied image.",
-            images=[ImageInput(source=path, local_path=path, mime_type="image/png")],
-        )
-        try:
-            result = asyncio.run(provider.analyze(req))
-            answer = result.result.get("answer", "")
-            ok = answer and "7391" in answer
-            print(f"  vision capability: {'available' if ok else 'unavailable'}")
-            print(f"  agy answer: {answer[:80]!r}")
-        except RuntimeError as exc:
-            if "cannot be called" in str(exc) or "running event loop" in str(exc):
-                print(f"  vision capability: skipped (cannot run probe inside existing event loop)")
-            else:
-                print(f"  vision capability: unsupported ({exc})")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  vision capability: unsupported ({exc})")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -275,20 +188,42 @@ def main(argv: Optional[list[str]] = None) -> int:
         return doctor(cfg, probe=args.probe)
 
     if args.command == "server":
-        from .services import run_server
+        from .server import run_server
 
         return run_server(cfg)
 
-    if args.command == "proxy":
-        _apply_proxy_overrides(cfg, args)
-        from .proxy import run_proxy
-
-        return run_proxy(cfg)
-
     if args.command in ("start", "stop", "restart"):
-        return _lifecycle(cfg, args)
+        from .server.lifecycle import probe_server, start_server, stop_server
 
-    return _serve(cfg, args.config)
+        if args.command in ("stop", "restart"):
+            _report(stop_server(cfg))
+        if args.command in ("start", "restart"):
+            if probe_server(cfg.server.host, cfg.server.port):
+                _report({"service": "server", "status": "already-running", "port": cfg.server.port})
+            else:
+                ok = start_server(cfg, args.config)
+                _report(
+                    {"service": "server", "status": "started" if ok else "failed", "port": cfg.server.port}
+                )
+                return 0 if ok else 1
+        return 0
+
+    # Default: MCP stdio server.
+    start_server = args.start_server
+    if start_server is None:
+        env_val = os.environ.get(_START_SERVER_ENV)
+        if env_val is None:
+            start_server = True
+        else:
+            start_server = env_val.strip().lower() not in {"0", "false", "no", "off"}
+    return _serve(cfg, args.config, start_server)
+
+
+def _report(res: dict) -> None:
+    line = f"{res['service']}: {res['status']}"
+    if res.get("port"):
+        line += f" (:{res['port']})"
+    print(line)
 
 
 if __name__ == "__main__":

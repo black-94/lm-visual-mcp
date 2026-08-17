@@ -1,58 +1,106 @@
-"""OpenCode provider tests (subprocess mocked)."""
+"""OpenCode API provider tests (mocked HTTP)."""
 
 from __future__ import annotations
 
-from lm_visual_mcp.models import VisionRequest
-from lm_visual_mcp.providers.opencode import OpenCodeProvider
-from lm_visual_mcp.services.subprocess_runner import SubprocessResult
+import base64
+import json
+from pathlib import Path
+
+import pytest
+
+from lm_visual_mcp.errors import ProviderUnavailableError
+from lm_visual_mcp.vision.providers.opencode import OpenCodeProvider
+from lm_visual_mcp.vision.types import ImageRequest, ProviderFailureReason
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
-class FakeRunner:
-    def __init__(self, result):
-        self.result = result
+class FakeResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
 
-    async def run(self, invocation):
-        return self.result
+    async def read(self) -> bytes:
+        return self._body
 
-    def resolve_executable(self, command):
-        return "/usr/bin/" + command
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
 
 
-def _req():
-    return VisionRequest(system_prompt="s", user_prompt="u")
+class FakeSession:
+    def __init__(self, responses: list) -> None:
+        self.responses = list(responses)
+        self.requests: list[dict] = []
+
+    def post(self, url, *, json=None, headers=None):
+        self.requests.append({"url": url, "json": json, "headers": headers})
+        return self.responses.pop(0)
 
 
-def test_opencode_extracts_assistant_text():
-    stream = (
-        '{"type":"message.part.updated","part":{"type":"text","text":"{\\"answer\\":\\"42\\"}"}}\n'
+def make_request(tmp_path: Path) -> ImageRequest:
+    img = tmp_path / "x.png"
+    img.write_bytes(_PNG)
+    return ImageRequest(
+        system_prompt="sys", user_prompt="describe",
+        images=[type("I", (), {"local_path": str(img), "url": None, "mime_type": "image/png"})()],
     )
-    res = SubprocessResult("/usr/bin/opencode", [], 0, stream, "")
-    p = OpenCodeProvider(command="opencode", runner=FakeRunner(res))
-    r = p.parse_output(res, _req())
-    assert r["answer"] == "42"
 
 
-def test_opencode_invocation_flags():
-    res = SubprocessResult("/usr/bin/opencode", [], 0, "", "")
-    p = OpenCodeProvider(command="opencode", model="google/gemini", effort="high", runner=FakeRunner(res))
-    inv = p.build_invocation(_req())
-    assert inv.args[0] == "run"
-    assert "--format" in inv.args and "json" in inv.args
-    assert "--model" in inv.args
-    assert "--variant" in inv.args and "high" in inv.args  # reasoning effort
+def ok_body(text: str) -> bytes:
+    return json.dumps({"choices": [{"message": {"content": text}}]}).encode()
 
 
-def test_opencode_classify_permission_denied():
-    from lm_visual_mcp.models import ProviderFailureReason
-    res = SubprocessResult("/usr/bin/opencode", [], 1, "", "error: permission denied")
-    assert OpenCodeProvider._classify(res) == ProviderFailureReason.PERMISSION_DENIED
+async def test_success_parses_json(tmp_path):
+    session = FakeSession([FakeResponse(200, ok_body('{"summary":"s","answer":"a"}'))])
+    p = OpenCodeProvider(api_key="k", session=session)
+    result = await p.analyze(make_request(tmp_path))
+    assert result.provider == "opencode"
+    assert result.result["answer"] == "a"
+    req = session.requests[0]
+    assert req["url"].endswith("/chat/completions")
+    assert req["headers"]["Authorization"] == "Bearer k"
+    # The image is inlined as a data URL.
+    content = req["json"]["messages"][1]["content"]
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
-def test_opencode_no_result_raises():
-    res = SubprocessResult("/usr/bin/opencode", [], 0, '{"type":"ping"}', "")
-    p = OpenCodeProvider(command="opencode", runner=FakeRunner(res))
-    try:
-        p.parse_output(res, _req())
-        assert False, "expected ProviderUnavailableError"
-    except Exception:
-        pass
+async def test_quota_error_classified(tmp_path):
+    session = FakeSession([FakeResponse(429, b'{"error":"rate"}')])
+    p = OpenCodeProvider(api_key="k", session=session)
+    with pytest.raises(ProviderUnavailableError) as ei:
+        await p.analyze(make_request(tmp_path))
+    assert ei.value.reason == ProviderFailureReason.QUOTA_EXHAUSTED
+
+
+async def test_auth_error_classified(tmp_path):
+    session = FakeSession([FakeResponse(401, b"unauthorized")])
+    p = OpenCodeProvider(api_key="bad", session=session)
+    with pytest.raises(ProviderUnavailableError) as ei:
+        await p.analyze(make_request(tmp_path))
+    assert ei.value.reason == ProviderFailureReason.NOT_AUTHENTICATED
+
+
+async def test_missing_key_unavailable():
+    p = OpenCodeProvider(api_key=None)
+    status = await p.probe()
+    assert status.available is False
+    assert status.reason == ProviderFailureReason.API_KEY_MISSING
+
+
+async def test_rate_limited_by_own_limiter(tmp_path):
+    clock = {"now": 0.0}
+    from lm_visual_mcp.vision.providers.ratelimit import RateLimiter
+
+    limiter = RateLimiter(rpm=1, clock=lambda: clock["now"])
+    session = FakeSession([FakeResponse(200, ok_body('{"answer":"a"}'))])
+    p = OpenCodeProvider(api_key="k", session=session, limiter=limiter)
+    await p.analyze(make_request(tmp_path))
+    with pytest.raises(ProviderUnavailableError) as ei:
+        await p.analyze(make_request(tmp_path))
+    assert ei.value.reason == ProviderFailureReason.RATE_LIMITED
