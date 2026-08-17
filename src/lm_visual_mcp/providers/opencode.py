@@ -33,13 +33,16 @@ import aiohttp
 from ..errors import ProviderUnavailableError
 from .base import Provider
 from .classifier import (
+    classifier_text_messages,
     disable_auto_classifier_thinking,
+    extract_verdict,
     normalize_auto_classifier_response,
 )
 from .json_output import extract_json
 from .ratelimit import RateLimiter
 from .schema import normalize_result
 from .types import (
+    ClassifierResult,
     ImageRequest,
     ProviderFailureReason,
     ProviderRequest,
@@ -213,6 +216,43 @@ class OpenCodeProvider(Provider):
         self, response: ProviderResponse
     ) -> tuple[bytes, bool]:
         return normalize_auto_classifier_response(response.body)
+
+    async def classify(self, request: ProviderRequest) -> "Optional[ClassifierResult]":
+        """Call opencode's own backend model for a classifier verdict.
+
+        Uses the OpenAI chat-completions dialect (``{base}/chat/completions``)
+        with this provider's configured ``model``. Returns ``None`` on any
+        failure or an ambiguous verdict so the router can fall through.
+        """
+        if not self._api_key:
+            return None
+        system, turns = classifier_text_messages(request.body)
+        if not turns:
+            return None
+        messages: list[dict] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.extend({"role": role, "content": text} for role, text in turns)
+        try:
+            async with self._get_session().post(
+                f"{self.base_url}/chat/completions",
+                json={"model": self.model, "messages": messages},
+                headers={"Authorization": f"Bearer {self._api_key}"},
+            ) as resp:
+                body = await resp.read()
+                if resp.status >= 400:
+                    raise self._classify_status(resp.status, body)
+                doc = json.loads(body)
+        except Exception:  # noqa: BLE001 - never break the classifier chain
+            logger.warning("opencode classifier inference failed", exc_info=True)
+            return None
+        text = _assistant_text(doc) or ""
+        verdict = extract_verdict(text)
+        if verdict is None:
+            return None
+        return ClassifierResult(
+            provider=self.name, model=self.model, verdict=verdict, raw=text
+        )
 
     # -- error mapping -------------------------------------------------------
     @staticmethod

@@ -21,15 +21,19 @@ verbatim - no built-in fallback normalization.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from ..providers.classifier import (
+    build_classifier_response,
     is_auto_classifier_request,
     is_auto_classifier_stage1_request,
 )
 from ..providers.router import ProviderRouter
 from ..providers.types import ProviderRequest, ProviderResponse
-from .hooks import Hook, HookContext, HookResult
+from .hooks import Hook, HookContext, HookResponse, HookResult
+
+logger = logging.getLogger("lm_visual_mcp.server.classifier_hook")
 from .protocols import ProtocolAdapter
 
 
@@ -60,12 +64,6 @@ class ClassifierHook(Hook):
             # Not in the allowlist -> forward the classifier request untouched.
             return HookResult.passthrough()
 
-        if is_auto_classifier_stage1_request(body):
-            # A provider may normalize the response verdict, so ask the
-            # forwarder to buffer the response body for this request.
-            ctx.state["classifier_stage1"] = True
-            ctx.state["read_response_body"] = True
-
         request = ProviderRequest(
             protocol="anthropic",
             url=ctx.url,
@@ -73,6 +71,32 @@ class ClassifierHook(Hook):
             headers=ctx.headers,
             body=body,
         )
+
+        # First try: a provider's own model produces a verdict and short-circuits
+        # (no upstream forward). Any failure / ambiguity advances the chain.
+        result = await self.router.classifier_verdict(request)
+        if result is not None:
+            if is_auto_classifier_stage1_request(body):
+                ctx.state["classifier_stage1"] = True
+            logger.info(
+                "classifier intercepted by %s (model=%s) verdict=%s",
+                result.provider, result.model, result.verdict,
+            )
+            return HookResult.intercept(
+                HookResponse(
+                    status=200,
+                    headers={"Content-Type": "application/json"},
+                    body=build_classifier_response(result),
+                )
+            )
+
+        # Fallback: no provider produced a verdict -> forward upstream with the
+        # byte-rewrite behavior (disable thinking / normalize), as before.
+        if is_auto_classifier_stage1_request(body):
+            # A provider may normalize the response verdict, so ask the
+            # forwarder to buffer the response body for this request.
+            ctx.state["classifier_stage1"] = True
+            ctx.state["read_response_body"] = True
         request, request_provider = await self.router.classify_request(request)
         if request_provider is None:
             # No provider on the classifier chain handled it -> passthrough.

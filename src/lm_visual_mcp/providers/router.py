@@ -32,6 +32,7 @@ from typing import Mapping, Optional, Sequence
 from ..errors import AllProvidersFailedError, ProviderUnavailableError
 from .base import Provider
 from .types import (
+    ClassifierResult,
     FallbackRecord,
     ImageRequest,
     ProviderFailureReason,
@@ -202,6 +203,29 @@ class ProviderRouter:
                 current = _with_body(current, body)
                 return current, provider.name
         return current, None
+
+    async def classifier_verdict(self, request: ProviderRequest) -> Optional[ClassifierResult]:
+        """Walk ``classifier_chain``; first provider whose own model returns a
+        definitive verdict wins (real-inference short-circuit).
+
+        Providers without the ``classify`` capability (CLI agents, base) are
+        skipped. Any exception or ambiguous result advances the chain. Returns
+        ``None`` when no provider produced a verdict - the caller then falls
+        back to the byte-rewrite/forward path.
+        """
+        for provider in self.classifier_chain:
+            classify = getattr(provider, "classify", None)
+            if classify is None:
+                continue
+            try:
+                result = await classify(request)
+            except Exception as exc:  # noqa: BLE001 - advance the chain
+                logger.warning("provider %s classify failed: %s", provider.name, exc)
+                continue
+            if result is not None:
+                logger.info("provider %s classified: %s", provider.name, result.verdict)
+                return result
+        return None
 
     # -- introspection --------------------------------------------------------
     async def status(self) -> list[ProviderStatus]:

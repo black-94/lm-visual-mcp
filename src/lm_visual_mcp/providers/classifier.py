@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Optional
+
+from .types import ClassifierResult
 
 _SYSTEM_MARKER = "You are a security monitor for autonomous AI coding agents."
 _STOP_SEQUENCE = "</block>"
@@ -108,6 +110,77 @@ def disable_auto_classifier_thinking(body: bytes) -> tuple[bytes, bool]:
     doc["thinking"] = disabled
     encoded = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return encoded, True
+
+
+def extract_verdict(text: str) -> Optional[str]:
+    """Return the single decisive ``"yes"``/``"no"`` from a model's raw output.
+
+    A classifier model is expected to answer with a ``<block>yes</block>`` /
+    ``<block>no</block>`` block. Runs the verdict regex over the whole blob; when
+    the matches don't resolve to exactly one distinct verdict (none, or both yes
+    and no) it returns ``None`` - the caller must not guess.
+    """
+    matches = set(match.group(1).lower() for match in _VERDICT_RE.finditer(text))
+    if len(matches) != 1:
+        return None
+    return matches.pop()
+
+
+def build_classifier_response(result: ClassifierResult) -> bytes:
+    """Frame a provider's own-model verdict as the Anthropic response CC expects.
+
+    Mirrors the framing in :func:`normalize_auto_classifier_response` - CC's
+    classifier parser wants the matched ``</block>`` stop sequence omitted from
+    the text and reported via ``stop_reason`` / ``stop_sequence``.
+    """
+    doc = {
+        "id": f"msg_{result.provider}",
+        "type": "message",
+        "role": "assistant",
+        "model": result.model,
+        "content": [{"type": "text", "text": f"<block>{result.verdict}"}],
+        "stop_reason": "stop_sequence",
+        "stop_sequence": _STOP_SEQUENCE,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+    return json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def classifier_text_messages(body: bytes) -> tuple[str, list[tuple[str, str]]]:
+    """Split a classifier request body into ``(system_text, [(role, text), ...])``.
+
+    Classifier requests carry no images, so content is reduced to its text
+    blocks. Returns an empty system string / message list for non-object JSON.
+    """
+    try:
+        doc = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return "", []
+    if not isinstance(doc, dict):
+        return "", []
+    system = _text_of(doc.get("system"))
+    messages = doc.get("messages")
+    turns: list[tuple[str, str]] = []
+    if isinstance(messages, list):
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                texts = [
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and isinstance(block.get("text"), str)
+                ]
+                text = "\n".join(texts)
+            else:
+                text = ""
+            if role and text:
+                turns.append((str(role), text))
+    return system, turns
 
 
 def _text_of(value: Any) -> str:

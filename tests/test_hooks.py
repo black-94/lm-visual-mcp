@@ -11,13 +11,16 @@ import json
 
 from lm_visual_mcp.providers.base import Provider
 from lm_visual_mcp.providers.classifier import (
+    build_classifier_response,
+    classifier_text_messages,
     disable_auto_classifier_thinking,
+    extract_verdict,
     is_auto_classifier_request,
     is_auto_classifier_stage1_request,
     normalize_auto_classifier_response,
 )
 from lm_visual_mcp.providers.router import ProviderRouter
-from lm_visual_mcp.providers.types import ProviderRequest, ProviderResponse
+from lm_visual_mcp.providers.types import ClassifierResult, ProviderRequest, ProviderResponse
 from lm_visual_mcp.server.classifier_hook import ClassifierHook
 from lm_visual_mcp.server.hooks import HookContext, HookPipeline, HookResponse, HookResult
 
@@ -148,6 +151,36 @@ def test_normalize_response_leaves_ambiguous_verdicts_alone():
     assert not changed and out is body
 
 
+def test_extract_verdict_too_many_or_none_is_ambiguous():
+    assert extract_verdict("It's fine. <block>no</block>") == "no"
+    assert extract_verdict("<block>yes</block>") == "yes"
+    assert extract_verdict("says <block>yes</block> also <block>no</block>") is None
+    assert extract_verdict("no verdict here") is None
+
+
+def test_build_classifier_response_frames_verdict():
+    body = build_classifier_response(ClassifierResult(provider="v", model="m", verdict="yes"))
+    doc = json.loads(body)
+    assert doc["type"] == "message"
+    assert doc["content"] == [{"type": "text", "text": "<block>yes"}]
+    assert doc["stop_reason"] == "stop_sequence"
+    assert doc["stop_sequence"] == "</block>"
+
+
+def test_classifier_text_messages_splits_system_and_turns():
+    body = json.dumps({
+        "system": [{"type": "text", "text": "sys"}],
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "text", "text": "hey"}]},
+            {"role": "user", "content": [{"type": "image", "source": {}}, {"type": "text", "text": "now"}]},
+        ],
+    }).encode()
+    system, turns = classifier_text_messages(body)
+    assert system == "sys"
+    assert turns == [("user", "hi"), ("assistant", "hey"), ("user", "now")]
+
+
 def test_disable_thinking_sets_thinking_disabled():
     body = classifier_body()
     out, changed = disable_auto_classifier_thinking(body)
@@ -168,6 +201,20 @@ class ClassifierCapable(Provider):
 
     async def rewrite_classifier_response(self, response: ProviderResponse):
         return normalize_auto_classifier_response(response.body)
+
+
+class ClassifyingProvider(Provider):
+    """A provider that answers the classifier with its own model verdict."""
+
+    def __init__(self, verdict="no"):
+        super().__init__()
+        self.name = "volcengine"
+        self._verdict = verdict  # None = unable
+
+    async def classify(self, request: ProviderRequest):
+        if self._verdict is None:
+            return None
+        return ClassifierResult(provider=self.name, model="DeepSeek-V4-Flash", verdict=self._verdict)
 
 
 class NoopProvider(Provider):
@@ -250,6 +297,38 @@ async def test_classifier_hook_model_allowlist_hit_routes():
     result = await hook.process(c)
     assert result.action == "continue" and result.body is not None
     assert c.state["classifier_provider"] == "gemini"
+
+
+async def test_classifier_hook_intercepts_when_provider_verdict():
+    hook = make_hook(ClassifyingProvider(verdict="no"))
+    c = ctx(classifier_body(stop_sequences=["</block>"]))
+    result = await hook.process(c)
+    assert result.action == "intercept"
+    body = json.loads(result.response.body)
+    assert body["type"] == "message"
+    assert body["content"] == [{"type": "text", "text": "<block>no"}]
+    assert body["stop_reason"] == "stop_sequence"
+    assert body["stop_sequence"] == "</block>"
+    assert c.state["classifier_stage1"] is True
+
+
+async def test_classifier_hook_intercept_no_verdict_falls_back_to_rewrite():
+    # A classifier-capable provider with no verdict (base classify -> None) still
+    # falls back to the byte-rewrite/forward path.
+    hook = make_hook(ClassifierCapable())  # gemini, rewrites thinking, no classify
+    c = ctx(classifier_body(stop_sequences=["</block>"]))
+    result = await hook.process(c)
+    assert result.action == "continue"
+    assert json.loads(result.body)["thinking"] == {"type": "disabled"}
+    assert c.state["classifier_provider"] == "gemini"
+
+
+async def test_classifier_hook_non_stage1_intercept_no_stage_flag():
+    hook = make_hook(ClassifyingProvider(verdict="yes"))
+    c = ctx(classifier_body())  # no stop_sequences -> not stage1
+    result = await hook.process(c)
+    assert result.action == "intercept"
+    assert "classifier_stage1" not in c.state
 
 
 async def test_classifier_hook_process_response_normalizes():

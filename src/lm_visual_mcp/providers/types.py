@@ -145,6 +145,22 @@ class FallbackRecord:
 
 
 @dataclass
+class ClassifierResult:
+    """A classifier verdict produced by a provider's own model.
+
+    ``verdict`` is the decisive ``"yes"`` / ``"no"`` (``"yes"`` = takeover /
+    safety violation detected). ``raw`` keeps the provider's original output for
+    debugging. An ambiguous / failed call must return ``None`` instead of a
+    result - callers must never invent a safety decision.
+    """
+
+    provider: str
+    model: Optional[str]
+    verdict: str
+    raw: Optional[str] = None
+
+
+@dataclass
 class ProviderRequest:
     """A classifier request handed to ``Provider.rewrite_classifier_request``.
 

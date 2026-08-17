@@ -25,6 +25,7 @@ from typing import Optional
 from ..errors import ProviderUnavailableError
 from .ratelimit import RateLimiter
 from .types import (
+    ClassifierResult,
     ImageRequest,
     ProviderFailureReason,
     ProviderRequest,
@@ -86,3 +87,9 @@ class Provider:
         self, response: ProviderResponse
     ) -> tuple[bytes, bool]:
         return response.body, False
+
+    # Optional real-inference classifier: default = not implemented (None), so
+    # the router's classifier_verdict skips providers that lack this capability
+    # (e.g. CLI agents). API providers override it to call their own model.
+    async def classify(self, request: ProviderRequest):
+        return None

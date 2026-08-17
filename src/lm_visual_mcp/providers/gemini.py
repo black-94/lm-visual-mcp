@@ -7,18 +7,24 @@ everywhere.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("lm_visual_mcp.providers.gemini")
 
 from ..errors import ProviderUnavailableError
 from .base import Provider
 from .classifier import (
+    classifier_text_messages,
     disable_auto_classifier_thinking,
+    extract_verdict,
     normalize_auto_classifier_response,
 )
 from .ratelimit import RateLimiter
 from .schema import normalize_result
 from .types import (
+    ClassifierResult,
     ImageRequest,
     ProviderFailureReason,
     ProviderRequest,
@@ -197,6 +203,42 @@ class GeminiProvider(Provider):
         self, response: ProviderResponse
     ) -> tuple[bytes, bool]:
         return normalize_auto_classifier_response(response.body)
+
+    async def classify(self, request: ProviderRequest) -> "Optional[ClassifierResult]":
+        """Call gemini's own backend model for a classifier verdict.
+
+        Uses the google-genai SDK with this provider's configured ``model``.
+        Returns ``None`` on any failure or an ambiguous verdict so the router can
+        fall through.
+        """
+        if not self._api_key:
+            return None
+        system, turns = classifier_text_messages(request.body)
+        if not turns:
+            return None
+        from google import genai
+
+        client = self._get_client()
+        config = genai.types.GenerateContentConfig(system_instruction=system or None)
+        try:
+            response = await client.aio.models.generate_content(
+                model=self.model,
+                contents=[
+                    {"role": "model" if role == "assistant" else role, "parts": [text]}
+                    for role, text in turns
+                ],
+                config=config,
+            )
+            text = _safe_getattr(response, "text", None) or ""
+        except Exception:  # noqa: BLE001 - never break the classifier chain
+            logger.warning("gemini classifier inference failed", exc_info=True)
+            return None
+        verdict = extract_verdict(text)
+        if verdict is None:
+            return None
+        return ClassifierResult(
+            provider=self.name, model=self.model, verdict=verdict, raw=text
+        )
 
 
 def _gemini_schema(schema: dict) -> dict:

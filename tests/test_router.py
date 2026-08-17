@@ -171,6 +171,27 @@ def make_req(body=b"orig"):
     return ProviderRequest(protocol="anthropic", url="http://x", model="m", headers={}, body=body)
 
 
+class VerdictProvider(Provider):
+    """A provider whose own model returns a classifier verdict."""
+
+    def __init__(self, name: str, verdict=None, exc: Exception | None = None) -> None:
+        super().__init__()
+        self.name = name
+        self._verdict = verdict  # None = unable -> returns None
+        self._exc = exc
+        self.calls = 0
+
+    async def classify(self, request: ProviderRequest):
+        self.calls += 1
+        if self._exc is not None:
+            raise self._exc
+        if self._verdict is None:
+            return None
+        from lm_visual_mcp.providers.types import ClassifierResult
+
+        return ClassifierResult(provider=self.name, model=f"{self.name}-m", verdict=self._verdict)
+
+
 def make_resp(body=b"resp"):
     return ProviderResponse(url="http://x", status=200, headers={}, body=body)
 
@@ -206,6 +227,42 @@ async def test_classify_response_none_changed_passthrough():
     resp, provider = await make_router([a], [], ["a"]).classify_response(make_resp())
     assert provider is None
     assert resp.body == b"resp"
+
+
+async def test_classifier_verdict_first_success_wins():
+    a = VerdictProvider("a")           # unable -> None
+    b = VerdictProvider("b", verdict="no")
+    c = VerdictProvider("c", verdict="yes")
+    result = await make_router([a, b, c], [], ["a", "b", "c"]).classifier_verdict(make_req())
+    assert result is not None
+    assert result.provider == "b"
+    assert result.verdict == "no"
+    assert a.calls == 1 and b.calls == 1 and c.calls == 0
+
+
+async def test_classifier_verdict_advances_on_exception():
+    a = VerdictProvider("a", exc=RuntimeError("boom"))
+    b = VerdictProvider("b")
+    c = VerdictProvider("c", verdict="yes")
+    result = await make_router([a, b, c], [], ["a", "b", "c"]).classifier_verdict(make_req())
+    assert result is not None and result.provider == "c"
+
+
+async def test_classifier_verdict_none_passthrough():
+    a = VerdictProvider("a")
+    b = VerdictProvider("b")
+    result = await make_router([a, b], [], ["a", "b"]).classifier_verdict(make_req())
+    assert result is None
+    assert a.calls == 1 and b.calls == 1
+
+
+async def test_classifier_verdict_skips_non_capable_provider():
+    # agy/codex-style provider (base classify -> None) is transparently skipped.
+    plain = FakeProvider("plain")
+    b = VerdictProvider("b", verdict="yes")
+    result = await make_router([plain, b], [], ["plain", "b"]).classifier_verdict(make_req())
+    assert result is not None and result.provider == "b"
+    assert b.calls == 1
 
 
 async def test_classifier_chain_independent_of_image_chain():
