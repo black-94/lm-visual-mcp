@@ -1,7 +1,8 @@
 """OpenCode provider (direct API, no local CLI).
 
 Calls an OpenAI-compatible chat-completions endpoint (by default the opencode
-cloud endpoint) with the API key resolved from configuration
+GO-plan cloud endpoint ``https://opencode.ai/zen/go/v1``) with the API key
+resolved from configuration
 (``api_key`` / ``api_key_env`` / ``OPENCODE_API_KEY``). Local images are
 inlined as ``image_url`` data URLs, so nothing is installed locally and no
 ``opencode`` CLI is needed.
@@ -33,9 +34,9 @@ from .ratelimit import RateLimiter
 
 logger = logging.getLogger("lm_visual_mcp.vision.providers.opencode")
 
-DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
+DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEFAULT_API_KEY_ENV = "OPENCODE_API_KEY"
-DEFAULT_MODEL = "grok-code"  # vision-capable default; override in config
+DEFAULT_MODEL = "mimo-v2.5"  # GO-plan multimodal default; override in config
 
 
 class OpenCodeProvider(Provider):

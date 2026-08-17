@@ -81,7 +81,11 @@ vision:
       type: opencode
       enabled: true
       # Direct API access (OpenAI-compatible); no local opencode CLI needed.
-      base_url: https://opencode.ai/zen/v1
+      # GO-plan multimodal default (mimo-v2.5). Models outside the
+      # chat-completions family (e.g. grok-4.5, gpt-5.6-luna) need the
+      # /zen/go/v1/responses endpoint and are not supported by this provider yet.
+      base_url: https://opencode.ai/zen/go/v1
+      model: mimo-v2.5
       api_key_env: OPENCODE_API_KEY
       rate_limit:
         rpm: 30
