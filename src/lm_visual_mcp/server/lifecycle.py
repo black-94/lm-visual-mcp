@@ -97,6 +97,9 @@ def _spawn_detached(cmd: list[str]) -> bool:
     except OSError as exc:  # e.g. missing interpreter
         logger.warning("failed to start background process %s: %s", cmd, exc)
         return False
+    finally:
+        # The child owns its own dup of the fd; ours is a leak once Popen returns.
+        logf.close()
 
 
 def start_server(

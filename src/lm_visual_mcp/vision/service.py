@@ -57,6 +57,11 @@ class VisionService:
         # Serializes request execution across every caller (all MCP sessions
         # funnel through the one shared server). Requests beyond
         # vision.max_concurrency queue here; set it to 1 for strict serial.
+        #
+        # NOT reentrant: never call analyze_images()/describe() from inside a
+        # block already holding this semaphore (e.g. a hook running within
+        # another call's `async with self._sem`) - once max_concurrency slots
+        # are taken the nested acquire waits forever, deadlocking the caller.
         self._sem = asyncio.Semaphore(cfg.vision.max_concurrency)
 
     def _make_media_service(self, workdir: Optional[Path] = None) -> MediaService:

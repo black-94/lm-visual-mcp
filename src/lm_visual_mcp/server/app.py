@@ -310,6 +310,11 @@ def run_server(cfg: AppConfig) -> int:
     concurrent MCP launches all connect to the winner (singleton).
     """
     _setup_server_logging()
+    # VisionServerApp -> VisionService creates asyncio primitives (a Semaphore)
+    # here, before the serving loop below exists. That is safe only because
+    # asyncio locks/semaphores bind to their loop lazily (Python >= 3.10, and
+    # this package requires >= 3.11); on 3.9 they would grab get_event_loop()
+    # at construction and later fail with "attached to a different loop".
     runner = web.AppRunner(VisionServerApp(cfg).build())
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

@@ -80,7 +80,7 @@ def _serve(cfg, config_path: Optional[str], start_server: bool) -> int:
     """Default command: MCP stdio server backed by the shared vision server."""
     from .mcp import build_mcp, connect
 
-    client = connect(cfg, config_path, start=start_server)
+    client = connect(cfg, config_path, start_server=start_server)
     if client is None:
         # Still serve MCP: every tool call answers with an actionable error
         # envelope instead of failing the whole session.
