@@ -20,6 +20,7 @@ selector for vendor providers) and declares the behavior method signatures.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from ..errors import ProviderUnavailableError
@@ -33,6 +34,8 @@ from .types import (
     ProviderResult,
     ProviderStatus,
 )
+
+logger = logging.getLogger("lm_visual_mcp.providers.base")
 
 
 class Provider:
@@ -93,3 +96,28 @@ class Provider:
     # (e.g. CLI agents). API providers override it to call their own model.
     async def classify(self, request: ProviderRequest):
         return None
+
+    async def classify_image(self, request: ProviderRequest) -> Optional[ClassifierResult]:
+        """Rate-limited template for real-inference classifier, mirroring
+        ``analyze_image``.
+
+        Draws from the SAME per-provider ``self._limiter`` as image analysis, so
+        a classifier verdict call and image analysis on one provider share a
+        single quota (rpm/concurrency) instead of each being unchecked. A full
+        limit yields ``None`` (no verdict) so the router advances to the next
+        provider rather than queueing. Providers without the ``classify``
+        capability inherit ``classify`` returning ``None`` regardless, so this
+        stays transparent for them.
+        """
+        if self._limiter is None or not self._limiter.enabled:
+            return await self.classify(request)
+        if not self._limiter.try_acquire():
+            logger.info(
+                "%s classifier rate limit reached; advancing classifier chain",
+                self.name,
+            )
+            return None
+        try:
+            return await self.classify(request)
+        finally:
+            self._limiter.release()

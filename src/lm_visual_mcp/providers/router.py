@@ -218,7 +218,10 @@ class ProviderRouter:
             if classify is None:
                 continue
             try:
-                result = await classify(request)
+                # ``classify_image`` applies the provider's shared rate limiter
+                # (same per-provider quota as image analysis), returning None on
+                # rate-limit or when the provider yields no verdict.
+                result = await provider.classify_image(request)
             except Exception as exc:  # noqa: BLE001 - advance the chain
                 logger.warning("provider %s classify failed: %s", provider.name, exc)
                 continue

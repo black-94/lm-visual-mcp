@@ -219,15 +219,17 @@ class GeminiProvider(Provider):
         from google import genai
 
         client = self._get_client()
-        config = genai.types.GenerateContentConfig(system_instruction=system or None)
+        kwargs: dict = {}
+        if system:
+            kwargs["system_instruction"] = system
         try:
             response = await client.aio.models.generate_content(
                 model=self.model,
                 contents=[
-                    {"role": "model" if role == "assistant" else role, "parts": [text]}
+                    {"role": "model" if role == "assistant" else role, "parts": [{"text": text}]}
                     for role, text in turns
                 ],
-                config=config,
+                config=genai.types.GenerateContentConfig(**kwargs),
             )
             text = _safe_getattr(response, "text", None) or ""
         except Exception:  # noqa: BLE001 - never break the classifier chain

@@ -9,6 +9,7 @@ from lm_visual_mcp.providers.base import Provider
 from lm_visual_mcp.providers.ratelimit import RateLimiter
 from lm_visual_mcp.providers.router import ProviderRouter
 from lm_visual_mcp.providers.types import (
+    ClassifierResult,
     ImageRequest,
     ProviderFailureReason,
     ProviderRequest,
@@ -174,8 +175,9 @@ def make_req(body=b"orig"):
 class VerdictProvider(Provider):
     """A provider whose own model returns a classifier verdict."""
 
-    def __init__(self, name: str, verdict=None, exc: Exception | None = None) -> None:
-        super().__init__()
+    def __init__(self, name: str, verdict=None, exc: Exception | None = None,
+                 limiter: RateLimiter | None = None) -> None:
+        super().__init__(limiter=limiter)
         self.name = name
         self._verdict = verdict  # None = unable -> returns None
         self._exc = exc
@@ -263,6 +265,66 @@ async def test_classifier_verdict_skips_non_capable_provider():
     result = await make_router([plain, b], [], ["plain", "b"]).classifier_verdict(make_req())
     assert result is not None and result.provider == "b"
     assert b.calls == 1
+
+
+async def test_classifier_verdict_rate_limited_provider_skipped():
+    """A classifier provider sharing its exhausted per-provider limiter must be
+    skipped (its classify never runs); the chain advances to the next provider."""
+    clock = {"now": 0.0}
+
+    def fake_clock() -> float:
+        return clock["now"]
+
+    limiter = RateLimiter(rpm=1, clock=fake_clock)
+    # Image path already consumed the single rpm slot on the shared limiter.
+    assert limiter.try_acquire()
+    a = VerdictProvider("a", verdict="no", limiter=limiter)
+    b = VerdictProvider("b", verdict="yes")
+    result = await make_router([a, b], [], ["a", "b"]).classifier_verdict(make_req())
+    assert result is not None and result.provider == "b"
+    assert a.calls == 0  # rate-limited before classify() ran
+    assert b.calls == 1
+
+
+class DualProvider(Provider):
+    """One provider doing BOTH image analysis and classifier verdict, owning a
+    single limiter - the realistic shape of gemini/volcengine/opencode."""
+
+    def __init__(self, name: str, *, limiter: RateLimiter) -> None:
+        super().__init__(limiter=limiter)
+        self.name = name
+        self.image_calls = 0
+        self.classify_calls = 0
+
+    async def _analyze_image(self, request: ImageRequest) -> ProviderResult:
+        self.image_calls += 1
+        return ProviderResult(provider=self.name, result={"answer": "ok"})
+
+    async def classify(self, request: ProviderRequest):
+        self.classify_calls += 1
+        return ClassifierResult(provider=self.name, model=f"{self.name}-m", verdict="no")
+
+
+async def test_classifier_verdict_image_and_classifier_share_limiter():
+    """The same per-provider limiter is shared across image analyze and
+    classifier classify: filling it via an image call throttles a subsequent
+    classifier verdict call on the SAME provider (falls through to next)."""
+    clock = {"now": 0.0}
+
+    def fake_clock() -> float:
+        return clock["now"]
+
+    v = DualProvider("v", limiter=RateLimiter(rpm=1, clock=fake_clock))
+    other = VerdictProvider("other", verdict="yes")
+    router = make_router([v, other], ["v", "other"], ["v", "other"])
+    # image analyze burns the single rpm slot on provider "v"'s limiter...
+    routed = await router.analyze_image(make_request())
+    assert routed.provider == "v"
+    # ...so the same provider's classifier classify is rate-limited -> next serves.
+    result = await router.classifier_verdict(make_req())
+    assert result is not None and result.provider == "other"
+    assert v.classify_calls == 0  # shared limiter stopped it before classify ran
+    assert other.calls == 1
 
 
 async def test_classifier_chain_independent_of_image_chain():

@@ -56,7 +56,7 @@ from .types import (
     ProviderUsage,
 )
 
-logger = logging.getLogger("lm_visual_mcp.vision.providers.volcengine")
+logger = logging.getLogger("lm_visual_mcp.providers.volcengine")
 
 DEFAULT_API_KEY_ENV = "VOLCENGINE_API_KEY"
 DEFAULT_API_MODEL = "doubao-seed-1-6-250615"  # api tier; override in config
