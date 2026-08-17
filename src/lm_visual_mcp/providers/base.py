@@ -97,9 +97,9 @@ class Provider:
     async def classify(self, request: ProviderRequest):
         return None
 
-    async def classify_image(self, request: ProviderRequest) -> Optional[ClassifierResult]:
-        """Rate-limited template for real-inference classifier, mirroring
-        ``analyze_image``.
+    async def classify_verdict(self, request: ProviderRequest) -> Optional[ClassifierResult]:
+        """Rate-limited template for a provider's real-inference classifier
+        verdict, mirroring ``analyze_image``.
 
         Draws from the SAME per-provider ``self._limiter`` as image analysis, so
         a classifier verdict call and image analysis on one provider share a
