@@ -8,9 +8,10 @@ in exception messages.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from .vision.types import ProviderFailureReason
+if TYPE_CHECKING:  # pragma: no cover - breaks the providers<->errors import cycle
+    from .providers.types import ProviderFailureReason
 
 
 class VisionError(Exception):
@@ -52,6 +53,8 @@ class ProviderUnavailableError(ProviderError):
         self.operable = operable
 
     def is_fallback_eligible(self, fallback_on: Optional[set[ProviderFailureReason]] = None) -> bool:
+        from .providers.types import ProviderFailureReason
+
         if fallback_on is None:
             return self.reason in ProviderFailureReason.fallback_eligible_defaults()
         return self.reason in fallback_on

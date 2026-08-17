@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ...errors import ProviderUnavailableError
-from ...vision.types import ProviderFailureReason
+from ..errors import ProviderUnavailableError
+from .types import ProviderFailureReason
 
 logger = logging.getLogger("lm_visual_mcp.vision.subprocess")
 

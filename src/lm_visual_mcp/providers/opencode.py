@@ -1,11 +1,22 @@
 """OpenCode provider (direct API, no local CLI).
 
-Calls an OpenAI-compatible chat-completions endpoint (by default the opencode
-GO-plan cloud endpoint ``https://opencode.ai/zen/go/v1``) with the API key
-resolved from configuration
-(``api_key`` / ``api_key_env`` / ``OPENCODE_API_KEY``). Local images are
-inlined as ``image_url`` data URLs, so nothing is installed locally and no
-``opencode`` CLI is needed.
+One provider class, two cloud modes selected by ``mode`` (both implemented):
+
+- ``mode: "go"``  (default) -> base ``https://opencode.ai/zen/go/v1``
+- ``mode: "zen"``            -> base ``https://opencode.ai/zen/v1``
+
+``base_url`` explicitly given in config overrides the mode default. The go/zen
+bases share the same endpoint families - ``/chat/completions`` (GLM/Kimi/
+DeepSeek/MiMo), ``/responses`` (GPT/Grok), ``/messages`` (Claude/Qwen) - and
+IMAGE analysis always uses ``/chat/completions``, so the two modes share one
+request construction and differ only in the base URL. The ``/responses`` and
+``/messages`` dialects are not used by the image path and are left for future
+extension.
+
+Local images are inlined as ``image_url`` data URLs, so nothing is installed
+locally and no ``opencode`` CLI is needed. API keys are resolved from
+configuration (``api_key`` / ``api_key_env`` / ``OPENCODE_API_KEY``) and never
+taken from a tool call.
 """
 
 from __future__ import annotations
@@ -19,24 +30,35 @@ from typing import Optional
 
 import aiohttp
 
-from ...errors import ProviderUnavailableError
-from ..schema import normalize_result
-from ..types import (
+from ..errors import ProviderUnavailableError
+from .base import Provider
+from .classifier import (
+    disable_auto_classifier_thinking,
+    normalize_auto_classifier_response,
+)
+from .json_output import extract_json
+from .ratelimit import RateLimiter
+from .schema import normalize_result
+from .types import (
     ImageRequest,
     ProviderFailureReason,
+    ProviderRequest,
+    ProviderResponse,
     ProviderResult,
     ProviderStatus,
     ProviderUsage,
 )
-from .base import Provider
-from .json_output import extract_json
-from .ratelimit import RateLimiter
 
 logger = logging.getLogger("lm_visual_mcp.vision.providers.opencode")
 
-DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEFAULT_API_KEY_ENV = "OPENCODE_API_KEY"
 DEFAULT_MODEL = "mimo-v2.5"  # GO-plan multimodal default; override in config
+
+#: Mode selector -> base URL. ``base_url`` in config overrides either.
+_MODE_BASES = {
+    "go": "https://opencode.ai/zen/go/v1",
+    "zen": "https://opencode.ai/zen/v1",
+}
 
 
 class OpenCodeProvider(Provider):
@@ -45,20 +67,24 @@ class OpenCodeProvider(Provider):
     def __init__(
         self,
         *,
+        mode: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
         api_key: Optional[str] = None,
         timeout: float = 120.0,
+        disable_thinking: Optional[bool] = None,
         session: Optional[aiohttp.ClientSession] = None,
         limiter: Optional[RateLimiter] = None,
     ) -> None:
-        super().__init__(limiter=limiter)
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        super().__init__(limiter=limiter, mode=mode)
+        self.mode = mode or "go"
+        self.base_url = (base_url or _MODE_BASES[self.mode]).rstrip("/")
         self.model = model or DEFAULT_MODEL
         self.effort = effort
         self._api_key = api_key
         self.timeout = timeout
+        self.disable_thinking = disable_thinking
         # session injectable for tests.
         self._session = session
 
@@ -75,7 +101,7 @@ class OpenCodeProvider(Provider):
             await self._session.close()
 
     # -- probe ---------------------------------------------------------------
-    async def probe(self, request: Optional[ImageRequest] = None) -> ProviderStatus:
+    async def probe_image(self, request: Optional[ImageRequest] = None) -> ProviderStatus:
         if not self._api_key:
             return ProviderStatus(
                 name=self.name,
@@ -91,7 +117,7 @@ class OpenCodeProvider(Provider):
         )
 
     # -- analyze -------------------------------------------------------------
-    async def _analyze(self, request: ImageRequest) -> ProviderResult:
+    async def _analyze_image(self, request: ImageRequest) -> ProviderResult:
         if not self._api_key:
             raise ProviderUnavailableError(
                 ProviderFailureReason.API_KEY_MISSING,
@@ -175,6 +201,19 @@ class OpenCodeProvider(Provider):
             body["reasoning_effort"] = self.effort
         return body
 
+    # -- classifier ----------------------------------------------------------
+    async def rewrite_classifier_request(
+        self, request: ProviderRequest
+    ) -> tuple[bytes, bool]:
+        if not self.disable_thinking:
+            return request.body, False
+        return disable_auto_classifier_thinking(request.body)
+
+    async def rewrite_classifier_response(
+        self, response: ProviderResponse
+    ) -> tuple[bytes, bool]:
+        return normalize_auto_classifier_response(response.body)
+
     # -- error mapping -------------------------------------------------------
     @staticmethod
     def _classify_status(status: int, body: bytes) -> ProviderUnavailableError:
@@ -202,21 +241,6 @@ class OpenCodeProvider(Provider):
         return ProviderUnavailableError(
             ProviderFailureReason.INVALID_INPUT,
             f"opencode rejected request (HTTP {status}): {snippet}",
-        )
-
-    @staticmethod
-    def _classify_exc(exc: Exception) -> ProviderUnavailableError:
-        if isinstance(exc, asyncio.TimeoutError):
-            return ProviderUnavailableError(
-                ProviderFailureReason.TIMEOUT, f"opencode request timed out: {exc}"
-            )
-        if isinstance(exc, aiohttp.ClientConnectorError):
-            return ProviderUnavailableError(
-                ProviderFailureReason.TEMPORARY_FAILURE,
-                f"cannot reach opencode endpoint: {exc}",
-            )
-        return ProviderUnavailableError(
-            ProviderFailureReason.TEMPORARY_FAILURE, f"opencode request failed: {exc}"
         )
 
 

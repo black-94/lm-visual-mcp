@@ -9,9 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from ...errors import ProviderUnavailableError
-from ..schema import normalize_result
-from ..types import (
+from ..errors import ProviderUnavailableError
+from .schema import normalize_result
+from .types import (
     ImageRequest,
     ProviderFailureReason,
     ProviderResult,
@@ -56,7 +56,7 @@ class CliProvider(Provider):
         self.runner = runner or SubprocessRunner()
 
     # -- probe -------------------------------------------------------------
-    async def probe(self, request: Optional[ImageRequest] = None) -> ProviderStatus:
+    async def probe_image(self, request: Optional[ImageRequest] = None) -> ProviderStatus:
         exe = self.runner.resolve_executable(self.command)
         if exe is None:
             return ProviderStatus(
@@ -86,7 +86,7 @@ class CliProvider(Provider):
         return "unknown"
 
     # -- analyze -----------------------------------------------------------
-    async def _analyze(self, request: ImageRequest) -> ProviderResult:
+    async def _analyze_image(self, request: ImageRequest) -> ProviderResult:
         invocation = self.build_invocation(request)
         result = await self.runner.run(invocation)
         return self.parse_result(result, request)

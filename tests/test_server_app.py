@@ -7,13 +7,33 @@ import json
 from aiohttp.test_utils import TestClient, TestServer
 
 from lm_visual_mcp.config import AppConfig
+from lm_visual_mcp.providers.base import Provider
 from lm_visual_mcp.server.app import VisionServerApp
+
+
+class StubRouter:
+    """Duck-typed ProviderRouter interface for the health endpoint."""
+
+    def __init__(self) -> None:
+        provider = type("P", (), {
+            "name": "stub",
+            "analyze_image": Provider.analyze_image,  # image capability absent
+            "_analyze_image": Provider._analyze_image,
+            "rewrite_classifier_request": Provider.rewrite_classifier_request,
+        })()
+        self.providers = {"stub": provider}
+
+    def image_chain_names(self):
+        return ["stub"]
+
+    def classifier_chain_names(self):
+        return ["stub"]
 
 
 class StubVision:
     def __init__(self) -> None:
         self.calls: list[dict] = []
-        self.router = type("R", (), {"providers": [type("P", (), {"name": "stub"})()]})()
+        self.router = StubRouter()
 
     async def analyze_images(self, *, tool, image_sources, user_prompt, output_type=None):
         self.calls.append(
@@ -39,14 +59,18 @@ async def test_health_reports_hooks_and_providers():
         doc = await resp.json()
         assert doc["ok"] is True
         assert "image" in doc["hooks"] and "classifier" in doc["hooks"]
-        assert doc["providers"] == ["stub"]
+        assert doc["image_chain"] == ["stub"]
+        assert doc["classifier_chain"] == ["stub"]
+        assert doc["providers"] == [
+            {"name": "stub", "image": False, "classifier": False}
+        ]
     finally:
         await client.close()
 
 
 async def test_health_reports_disabled_hooks():
     cfg = AppConfig()
-    cfg.server.image_hook.enabled = False
+    cfg.hooks.image.enabled = False
     app, _ = make_app(cfg)
     client = TestClient(TestServer(app.build()))
     await client.start_server()

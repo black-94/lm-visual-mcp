@@ -1,5 +1,7 @@
 version: 2
 
+# Root nodes: server / hooks / providers / vision / media / logging.
+
 # The shared singleton server: vision endpoint + request hooks.
 # NOTE: there is no `mcp:` section - whether the MCP process should start the
 # server is decided by the agent's MCP config (`--start-server` (default) /
@@ -8,18 +10,107 @@ server:
   host: 127.0.0.1
   port: 8787
 
-  # Image request hook: rewrite image blocks in proxied LLM requests into text
-  # descriptions (each rewritten block records the image's absolute local path).
-  image_hook:
+# Hooks: image (rewrites image blocks -> text descriptions), classifier
+# (Claude Code Auto-classifier compatibility).
+hooks:
+  image:
     enabled: true
+    # `models`: empty = apply to ALL models. Non-empty = ONLY these models are
+    # described/rewritten; every other model is passed through untouched.
+    models: []
 
-  # Claude Code Auto-classifier compatibility hook: disable thinking on
-  # classifier requests and normalize stage-1 verdict responses.
-  classifier_hook:
+  classifier:
     enabled: true
+    # `models`: empty = ALL models. Non-empty = ONLY these models route through
+    # the classifier chain; others pass through untouched (no read_response_body).
+    models: []
+    # NOTE: `disable_thinking` is gone from here - it moved to the provider
+    # level (see providers[].disable_thinking) and is only honored by API
+    # providers that implement classifier handling (gemini/opencode/volcengine).
+    # If no provider on the classifier_chain implements classifier handling,
+    # classifier requests pass through the proxy byte-for-byte untouched.
+
+# Top-level provider instances (the single source of truth). Each has a `name`
+# that the vision image_chain / classifier_chain reference by name.
+providers:
+  - name: agy
+    type: agy
+    enabled: true
+    command: agy
+    # AGY has no standalone effort flag: the agy provider folds `effort` into
+    # the model name for the CLI (e.g. gemini-3.6-flash + high ->
+    # `--model gemini-3.6-flash-high`). Keep model/effort separate here.
+    # Verified real model (see `agy models` for variants like
+    # "gemini-3.6-flash-high"/"-low").
+    model: gemini-3.6-flash
+    effort: high
+    # Seconds to keep an "unsupported" verdict cached before AGY is retried.
+    vision_cache_ttl: 300
+    # Per-provider rate limiting: hitting either limit immediately downgrades
+    # this request to the next provider in the chain.
+    rate_limit:
+      rpm: 30
+      concurrency: 2
+    # Local CLI providers (agy, codex) have NO classifier handling by default.
+
+  - name: gemini
+    type: gemini
+    enabled: true
+    model: gemini-3.6-flash
+    effort: high
+    api_key_env: GEMINI_API_KEY
+    # For compatibility only - prefer api_key_env / environment variable.
+    # api_key: "never-commit-a-plain-text-key"
+    # API provider implementing classifier handling: disable thinking on
+    # classifier requests + normalize stage-1 verdict responses.
+    disable_thinking: true
+    rate_limit:
+      rpm: 60
+
+  - name: codex
+    type: codex
+    enabled: true
+    command: codex
+    # Verified real model; images are passed natively via `-i`. Reliable.
+    model: gpt-5.6-luna
+    effort: high
+    # Local CLI provider - no classifier handling.
+    rate_limit:
+      rpm: 30
+
+  - name: opencode
+    type: opencode
+    enabled: true
+    # mode: go (default) | zen. Direct API access (OpenAI-compatible); no local
+    # opencode CLI needed. go and zen share the same chat-completions image call,
+    # they only differ by base URL.
+    mode: go
+    # Or zen:
+    # mode: zen            # -> https://opencode.ai/zen/v1
+    # base_url 显式给定时覆盖 mode 默认（go -> https://opencode.ai/zen/go/v1）。
+    # base_url: https://opencode.ai/zen/go/v1
+    model: mimo-v2.5
+    api_key_env: OPENCODE_API_KEY
+    # API provider implementing classifier handling.
+    disable_thinking: true
+    rate_limit:
+      rpm: 30
+
+  - name: volcengine
+    type: volcengine
+    enabled: true
+    # mode: agent (default) | coding | api
+    #   agent  -> Agent Plan   base https://ark.cn-beijing.volces.com/api/plan  (Anthropic Messages)
+    #   coding -> Coding Plan  base https://ark.cn-beijing.volces.com/api/coding (Anthropic Messages)
+    #   api    -> 按量推理       base https://ark.cn-beijing.volces.com/api/v3      (OpenAI chat-completions)
+    mode: agent
+    # Or coding / api:
+    # mode: coding
+    # mode: api
+    api_key_env: VOLCENGINE_API_KEY
+    # API provider implementing classifier handling.
     disable_thinking: true
 
-# Vision capability (image recognition only in this version).
 vision:
   timeout: 120
   # Requests beyond this queue inside the shared server.
@@ -39,56 +130,13 @@ vision:
       - timeout
       - temporary_failure
 
-  # Provider chain: list order = fallback order. Each entry is {name, type};
-  # `type` is resolved through the provider registry (agy | codex | gemini |
-  # opencode), so multiple instances of one type are possible.
-  providers:
-    - name: agy
-      type: agy
-      enabled: true
-      command: agy
-      model: gemini-3.6-flash
-      effort: high
-      # Seconds to keep an "unsupported" verdict cached before AGY is retried.
-      vision_cache_ttl: 300
-      # Per-provider rate limiting: hitting either limit immediately downgrades
-      # this request to the next provider in the chain.
-      rate_limit:
-        rpm: 30
-        concurrency: 2
-
-    - name: codex
-      type: codex
-      enabled: true
-      command: codex
-      model: gpt-5.6-luna
-      effort: high
-      rate_limit:
-        rpm: 30
-
-    - name: gemini
-      type: gemini
-      enabled: true
-      model: gemini-3.6-flash
-      effort: high
-      api_key_env: GEMINI_API_KEY
-      # For compatibility only - prefer api_key_env / environment variable.
-      # api_key: "never-commit-a-plain-text-key"
-      rate_limit:
-        rpm: 60
-
-    - name: opencode
-      type: opencode
-      enabled: true
-      # Direct API access (OpenAI-compatible); no local opencode CLI needed.
-      # GO-plan multimodal default (mimo-v2.5). Models outside the
-      # chat-completions family (e.g. grok-4.5, gpt-5.6-luna) need the
-      # /zen/go/v1/responses endpoint and are not supported by this provider yet.
-      base_url: https://opencode.ai/zen/go/v1
-      model: mimo-v2.5
-      api_key_env: OPENCODE_API_KEY
-      rate_limit:
-        rpm: 30
+  # image_chain: execution order for image analysis (first success wins).
+  # classifier_chain: execution order for classifier handling (first provider to
+  #   report a `changed` rewrite wins; if none implements classifier handling,
+  #   requests pass through byte-for-byte untouched).
+  # Both reference providers by `name` above. Unknown/disabled names are skipped.
+  image_chain: [agy, codex, gemini, opencode]
+  classifier_chain: [gemini, opencode]
 
 media:
   max_image_mb: 20

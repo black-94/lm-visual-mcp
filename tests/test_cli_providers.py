@@ -16,10 +16,10 @@ from pathlib import Path
 import pytest
 
 from lm_visual_mcp.errors import ProviderUnavailableError
-from lm_visual_mcp.vision.providers.agy import AgyProvider
-from lm_visual_mcp.vision.providers.codex import CodexProvider
-from lm_visual_mcp.vision.providers.runner import SubprocessResult
-from lm_visual_mcp.vision.types import ImageInput, ImageRequest, ProviderFailureReason
+from lm_visual_mcp.providers.agy import AgyProvider
+from lm_visual_mcp.providers.codex import CodexProvider
+from lm_visual_mcp.providers.runner import SubprocessResult
+from lm_visual_mcp.providers.types import ImageInput, ImageRequest, ProviderFailureReason
 
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -69,7 +69,7 @@ async def test_agy_success_runs_one_invocation(tmp_path):
     runner = FakeRunner([SubprocessResult("agy", ["-p"], 0, out, "")])
     p = AgyProvider(runner=runner)
 
-    result = await p.analyze(make_request(tmp_path))
+    result = await p.analyze_image(make_request(tmp_path))
 
     assert result.provider == "agy"
     assert result.result["answer"] == "the answer"
@@ -90,6 +90,37 @@ async def test_agy_success_runs_one_invocation(tmp_path):
     assert "IMAGE 0:" in prompt and "MUST actually inspect" in prompt
 
 
+async def test_agy_folds_effort_into_model_flag(tmp_path):
+    """Effort is appended to the model name; no standalone --effort is emitted.
+
+    AGY has no separate effort parameter, so `model=gemini-3.6-flash` +
+    `effort=high` must invoke `--model gemini-3.6-flash-high` (never a bare
+    `--effort` flag).
+    """
+    runner = FakeRunner([SubprocessResult(
+        "agy", ["-p"], 0, json.dumps({"response": '{"answer":"a"}', "usage": {}}), "",
+    )])
+    p = AgyProvider(runner=runner, model="gemini-3.6-flash", effort="high")
+    await p.analyze_image(make_request(tmp_path))
+    args = runner.runs[0].args
+    assert "--model" in args
+    assert args[args.index("--model") + 1] == "gemini-3.6-flash-high"
+    assert "--effort" not in args
+
+
+async def test_agy_model_already_suffixed_not_double_appended(tmp_path):
+    """A model that already carries the effort suffix is left untouched."""
+    runner = FakeRunner([SubprocessResult(
+        "agy", ["-p"], 0, json.dumps({"response": '{"answer":"a"}', "usage": {}}), "",
+    )])
+    p = AgyProvider(runner=runner, model="gemini-3.6-flash-medium", effort="medium")
+    await p.analyze_image(make_request(tmp_path))
+    args = runner.runs[0].args
+    assert args[args.index("--model") + 1] == "gemini-3.6-flash-medium"
+    assert args.count(args[args.index("--model") + 1]) == 1  # no -medium-medium
+    assert "--effort" not in args
+
+
 async def test_agy_multi_image_is_a_single_call(tmp_path):
     """Two images still cost exactly one AGY invocation (no per-image loop)."""
     runner = FakeRunner([SubprocessResult("agy", ["-p"], 0,
@@ -98,7 +129,7 @@ async def test_agy_multi_image_is_a_single_call(tmp_path):
                                           "")])
     p = AgyProvider(runner=runner)
 
-    await p.analyze(make_request(tmp_path, images=2))
+    await p.analyze_image(make_request(tmp_path, images=2))
 
     assert len(runner.runs) == 1
     assert len(runner.runs[0].args) >= 1  # the -p prompt carries both images' block
@@ -114,12 +145,12 @@ async def test_agy_unsupported_fails_fast_after_first_run(tmp_path):
     p = AgyProvider(runner=runner)
 
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path))
+        await p.analyze_image(make_request(tmp_path))
     assert ei.value.reason == ProviderFailureReason.UNSUPPORTED_MEDIA
 
     # A second image request fails fast without spawning AGY again (TTL fresh).
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path / "other"))
+        await p.analyze_image(make_request(tmp_path / "other"))
     assert ei.value.reason == ProviderFailureReason.UNSUPPORTED_MEDIA
     assert len(runner.runs) == 1  # cached verdict; no second subprocess
 
@@ -129,7 +160,7 @@ async def test_agy_quota_classified(tmp_path):
                                           "", "rate limit exceeded")])
     p = AgyProvider(runner=runner)
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path))
+        await p.analyze_image(make_request(tmp_path))
     assert ei.value.reason == ProviderFailureReason.QUOTA_EXHAUSTED
 
 
@@ -142,7 +173,7 @@ async def test_codex_success_runs_one_invocation(tmp_path):
     runner = FakeRunner([SubprocessResult("codex", ["exec"], 0, out, "")])
     p = CodexProvider(runner=runner)
 
-    result = await p.analyze(make_request(tmp_path))
+    result = await p.analyze_image(make_request(tmp_path))
 
     assert result.provider == "codex"
     assert result.result["answer"] == "the answer"
@@ -167,7 +198,7 @@ async def test_codex_quota_classified(tmp_path):
                                           "", "rate limit 429")])
     p = CodexProvider(runner=runner)
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path))
+        await p.analyze_image(make_request(tmp_path))
     assert ei.value.reason == ProviderFailureReason.QUOTA_EXHAUSTED
 
 
@@ -175,5 +206,5 @@ async def test_codex_unparseable_output_is_temporary_failure(tmp_path):
     runner = FakeRunner([SubprocessResult("codex", ["exec"], 0, "definitely not json", "")])
     p = CodexProvider(runner=runner)
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path))
+        await p.analyze_image(make_request(tmp_path))
     assert ei.value.reason in (ProviderFailureReason.TEMPORARY_FAILURE,)

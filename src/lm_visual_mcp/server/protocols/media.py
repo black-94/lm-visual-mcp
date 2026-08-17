@@ -13,7 +13,7 @@ import hashlib
 
 from ...errors import MediaError
 from ...media import MediaService, tempfile_mkdtemp
-from ...vision.types import ImageInput
+from ...providers.types import ImageInput
 
 _MIME_EXT = {
     "image/png": ".png",

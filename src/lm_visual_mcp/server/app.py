@@ -28,6 +28,8 @@ from aiohttp import web
 from .. import __version__
 from ..config import AppConfig
 from ..media import MediaService, WorkspaceManager
+from ..providers import build_router
+from ..providers.base import Provider
 from ..vision.service import VisionService
 from .cache import VisionCache
 from ..paths import RUNTIME_DIR
@@ -81,7 +83,12 @@ class VisionServerApp:
         session=None,
     ) -> None:
         self.cfg = cfg
-        self.vision = vision or VisionService(cfg)
+        # The single shared provider router driving BOTH the vision endpoint and
+        # the classifier hook. Built once from the top-level providers + dual
+        # chains, so image descriptions and classifier rewrites share one set of
+        # provider instances and their rate limits.
+        self.router = build_router(cfg)
+        self.vision = vision or VisionService(cfg, router=self.router)
         # Per-task workspaces: each image-bearing proxy request gets its own
         # RUNTIME_DIR/<uuid> workspace so media lands in a single predictable
         # directory. Workspaces are retained (GC reclaims them) so the absolute
@@ -102,8 +109,8 @@ class VisionServerApp:
 
     def _build_pipeline(self) -> HookPipeline:
         hooks = []
-        scfg = self.cfg.server
-        if scfg.image_hook.enabled:
+        hcfg = self.cfg.hooks
+        if hcfg.image.enabled:
             hooks.append(
                 ImageHook(
                     media=self.media,
@@ -111,10 +118,17 @@ class VisionServerApp:
                     cache=self.cache,
                     adapters=self._adapters,
                     timeout=self.cfg.vision.timeout,
+                    models=hcfg.image.models,
                 )
             )
-        if scfg.classifier_hook.enabled:
-            hooks.append(ClassifierHook(disable_thinking=scfg.classifier_hook.disable_thinking))
+        if hcfg.classifier.enabled:
+            hooks.append(
+                ClassifierHook(
+                    router=self.router,
+                    adapters=self._adapters,
+                    models=hcfg.classifier.models,
+                )
+            )
         return HookPipeline(hooks)
 
     def _make_request_media(self, workdir: Path) -> MediaService:
@@ -137,12 +151,22 @@ class VisionServerApp:
         return app
 
     async def health(self, request: web.Request) -> web.Response:
+        router = self.vision.router
         return web.json_response(
             {
                 "ok": True,
                 "version": __version__,
                 "hooks": [h.name for h in self.pipeline.hooks],
-                "providers": [p.name for p in self.vision.router.providers],
+                "image_chain": router.image_chain_names(),
+                "classifier_chain": router.classifier_chain_names(),
+                "providers": [
+                    {
+                        "name": name,
+                        "image": _has_image_capability(provider),
+                        "classifier": _has_classifier_capability(provider),
+                    }
+                    for name, provider in router.providers.items()
+                ],
                 "pid": os.getpid(),
             }
         )
@@ -374,6 +398,23 @@ def run_server(cfg: AppConfig) -> int:
     finally:
         loop.close()
     return 0
+
+
+def _has_image_capability(provider) -> bool:
+    """Whether ``provider`` implements image analysis (not the abstract default).
+
+    A concrete image provider implements ``_analyze_image`` (or inherits it from
+    ``CliProvider``); the abstract ``Provider._analyze_image`` raises
+    ``NotImplementedError`` and is not a real capability.
+    """
+    return type(provider)._analyze_image is not Provider._analyze_image
+
+
+def _has_classifier_capability(provider) -> bool:
+    """Whether ``provider`` implements classifier rewriting (vs. explicit passthrough)."""
+    return (
+        type(provider).rewrite_classifier_request is not Provider.rewrite_classifier_request
+    )
 
 
 # -- header helpers -----------------------------------------------------------

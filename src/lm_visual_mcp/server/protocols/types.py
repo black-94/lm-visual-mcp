@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ...media import MediaService
-from ...vision.types import ImageInput
+from ...providers.types import ImageInput
 
 
 @dataclass
@@ -40,6 +40,14 @@ class ProtocolAdapter:
         raise NotImplementedError
 
     def extract(self, body: bytes, media: MediaService) -> Extracted:
+        raise NotImplementedError
+
+    def model_of(self, body: bytes) -> str | None:
+        """Return the target model name from a request body, or None.
+
+        Implementations read the protocol-specific ``model`` field. Used by the
+        hooks to apply model allowlists (empty list = all models).
+        """
         raise NotImplementedError
 
 

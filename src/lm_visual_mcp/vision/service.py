@@ -17,10 +17,10 @@ from typing import Optional
 from ..config import AppConfig
 from ..errors import AllProvidersFailedError, MediaError, VisionError
 from ..media import MediaService, Workspace, WorkspaceManager
+from ..providers.router import RoutedResult, ProviderRouter
+from ..providers.schema import VISION_RESULT_SCHEMA
+from ..providers.types import ImageInput, ImageRequest
 from .prompts import get_system_prompt
-from .router import RoutedResult, VisionRouter
-from .schema import VISION_RESULT_SCHEMA
-from .types import ImageInput, ImageRequest
 
 logger = logging.getLogger("lm_visual_mcp.vision.service")
 
@@ -40,20 +40,16 @@ _DESCRIBE_USER = (
 
 
 class VisionService:
-    def __init__(self, cfg: AppConfig, router: Optional[VisionRouter] = None) -> None:
+    def __init__(self, cfg: AppConfig, router: Optional[ProviderRouter] = None) -> None:
         self.cfg = cfg
         # Zero-arg WorkspaceManager: every task's workspace is rooted at
         # RUNTIME_DIR/<uuid>. Workspaces are retained (GC reclaims them) so the
         # absolute image paths referenced later stay valid.
         self.workspaces = WorkspaceManager()
         if router is None:
-            from .providers import build_chain
+            from ..providers import build_router
 
-            router = VisionRouter(
-                build_chain(cfg.vision),
-                fallback_enabled=cfg.vision.fallback.enabled,
-                fallback_on=cfg.vision.fallback.reasons(),
-            )
+            router = build_router(cfg)
         self.router = router
         # Serializes request execution across every caller (all MCP sessions
         # funnel through the one shared server). Requests beyond
@@ -94,7 +90,7 @@ class VisionService:
                     user_prompt=user_prompt,
                     image_sources=image_sources,
                 )
-                routed = await self.router.analyze(request)
+                routed = await self.router.analyze_image(request)
                 return self._envelope(routed)
             except AllProvidersFailedError as exc:
                 return self._error_envelope(exc)
@@ -102,12 +98,21 @@ class VisionService:
                 return self._error_envelope(exc)
 
     # -- describe (server image hook) ----------------------------------------
-    async def describe(self, images: list[ImageInput], timeout: Optional[float] = None) -> tuple[list[str], str]:
+    async def describe(
+        self,
+        images: list[ImageInput],
+        timeout: Optional[float] = None,
+        *,
+        model: Optional[str] = None,
+        source_protocol: Optional[str] = None,
+    ) -> tuple[list[str], str]:
         """Run one generic description pass over already-local images.
 
         Returns ``(descriptions, provider_chain)``. The list is aligned with
         ``images`` (padded/truncated to match); the provider chain is a short
-        observability string (e.g. ``"codex"`` or ``"codex+2fb"``).
+        observability string (e.g. ``"codex"`` or ``"codex+2fb"``). ``model`` /
+        ``source_protocol`` are the upstream request's model + protocol, recorded
+        on the :class:`ImageRequest` so image providers can use them.
         """
         if not images:
             return [], ""
@@ -117,9 +122,11 @@ class VisionService:
             images=images,
             output_schema=DESCRIBE_SCHEMA,
             timeout=timeout or self.cfg.vision.timeout,
+            model=model,
+            source_protocol=source_protocol,
         )
         async with self._sem:
-            routed = await self.router.analyze(request)
+            routed = await self.router.analyze_image(request)
         provider_chain = routed.provider
         if routed.fallbacks:
             provider_chain = f"{provider_chain}+{len(routed.fallbacks)}fb"

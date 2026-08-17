@@ -32,6 +32,7 @@ class ImageHook(Hook):
         cache: VisionCache | None = None,
         adapters: dict[str, ProtocolAdapter] | None = None,
         timeout: float | None = None,
+        models: list[str] | None = None,
     ) -> None:
         self.media = media
         self.vision = vision
@@ -40,10 +41,16 @@ class ImageHook(Hook):
         self.cache = cache if cache is not None else VisionCache()
         self.adapters = adapters or {}
         self.timeout = timeout
+        # Model allowlist: empty = apply to all models; non-empty = only listed.
+        self.models = models or []
 
     async def process(self, ctx: HookContext) -> HookResult:
-        adapter = self.adapters.get(ctx.state.get("protocol", ""))
+        protocol = ctx.state.get("protocol", "")
+        adapter = self.adapters.get(protocol)
         if adapter is None or not adapter.has_image(ctx.body):
+            return HookResult.passthrough()
+        if self.models and adapter.model_of(ctx.body) not in self.models:
+            # Not in the allowlist -> forward the image blocks upstream untouched.
             return HookResult.passthrough()
 
         # Media is per-request: the server wiring injects a MediaService bound
@@ -58,7 +65,7 @@ class ImageHook(Hook):
         if not extracted.slots:
             return HookResult.passthrough()
 
-        descs = await self._describe_cached(extracted.slots)
+        descs = await self._describe_cached(extracted.slots, ctx)
         for slot, desc in zip(extracted.slots, descs):
             slot.apply(desc)
         logger.info(
@@ -70,7 +77,7 @@ class ImageHook(Hook):
         return None  # responses pass through untouched
 
     # -- describe (per-image cache, batched vision call) --------------------
-    async def _describe_cached(self, slots) -> list[str]:
+    async def _describe_cached(self, slots, ctx: HookContext) -> list[str]:
         n = len(slots)
         descs: list[str] = [""] * n
         missed: list[int] = []
@@ -83,7 +90,14 @@ class ImageHook(Hook):
                 missed.append(i)
         if missed:
             images = [slots[i].image for i in missed]
-            results, provider_chain = await self.vision.describe(images, timeout=self.timeout)
+            adapter = self.adapters.get(ctx.state.get("protocol", ""))
+            model = adapter.model_of(ctx.body) if adapter is not None else None
+            results, provider_chain = await self.vision.describe(
+                images,
+                timeout=self.timeout,
+                model=model,
+                source_protocol=ctx.state.get("protocol"),
+            )
             logger.info("DESCRIBE missed=%d providers=%s", len(missed), provider_chain)
             for k, i in enumerate(missed):
                 txt = results[k] if k < len(results) else ""

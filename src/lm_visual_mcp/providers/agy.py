@@ -25,12 +25,12 @@ from typing import Optional
 
 logger = logging.getLogger("lm_visual_mcp.vision.providers.agy")
 
-from ...errors import ProviderUnavailableError
-from ..types import ImageRequest, ProviderFailureReason
+from ..errors import ProviderUnavailableError
 from .cli import CliProvider
 from .json_output import extract_json
 from .ratelimit import RateLimiter
 from .runner import SubprocessInvocation, SubprocessResult
+from .types import ImageRequest, ProviderFailureReason
 
 
 class AgyProvider(CliProvider):
@@ -98,7 +98,7 @@ class AgyProvider(CliProvider):
         return "no output produced" in combined
 
     # -- analyze -----------------------------------------------------------
-    async def _analyze(self, request: ImageRequest) -> object:
+    async def _analyze_image(self, request: ImageRequest) -> object:
         # Every image request is exactly one real AGY call. AGY is
         # non-deterministic in headless mode; a runtime failure surfaces in
         # parse_output as UNSUPPORTED_MEDIA and caches here so subsequent image
@@ -108,7 +108,7 @@ class AgyProvider(CliProvider):
                 ProviderFailureReason.UNSUPPORTED_MEDIA,
                 "agy headless cannot read images (tool permission auto-denied)",
             )
-        return await super()._analyze(request)
+        return await super()._analyze_image(request)
 
     @staticmethod
     def _media_dir(request: ImageRequest) -> Path:
@@ -126,6 +126,22 @@ class AgyProvider(CliProvider):
             return request.workdir
         return Path.cwd()
 
+    def _resolved_model(self) -> Optional[str]:
+        """The model name AGY is actually invoked with.
+
+        AGY has no separate effort parameter - effort is appended to the model
+        name (``gemini-3.6-flash`` + effort ``high`` -> ``gemini-3.6-flash-high``).
+        The config keeps ``model`` and ``effort`` as separate, convenient knobs;
+        this method folds them together for the CLI. A model that already ends
+        with the effort suffix is left untouched (no double suffix).
+        """
+        model = self.model
+        if not model:
+            return None
+        if self.effort and not model.endswith(f"-{self.effort}"):
+            return f"{model}-{self.effort}"
+        return model
+
     def build_invocation(self, request: ImageRequest) -> SubprocessInvocation:
         media_dir = self._media_dir(request)
         prompt = self._media_instructions(request, base_dir=media_dir)
@@ -137,10 +153,13 @@ class AgyProvider(CliProvider):
             import json
 
             args += ["--json-schema", json.dumps(request.output_schema)]
-        if self.model:
-            args += ["--model", self.model]
-        if self.effort:
-            args += ["--effort", self.effort]
+        # AGY has no standalone `--effort` flag: reasoning effort is folded into
+        # the model name (`gemini-3.6-flash` + effort high -> ...-high). Passing
+        # a bare --effort alongside a suffixed model double-specifies it and has
+        # been observed to fail with a quota/eligibility error.
+        resolved = self._resolved_model()
+        if resolved:
+            args += ["--model", resolved]
         # Register the media dir so AGY can read the staged images by bare
         # filename. Files in an added dir are readable natively - no read_file
         # grant and no command(ls) grant required, and never command(*).

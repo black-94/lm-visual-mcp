@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ...errors import ProviderUnavailableError
-from ..schema import build_codex_schema
-from ..types import ImageRequest, ProviderFailureReason
+from ..errors import ProviderUnavailableError
 from .cli import CliProvider
 from .json_output import extract_json
 from .ratelimit import RateLimiter
 from .runner import SubprocessInvocation, SubprocessResult
+from .schema import build_codex_schema
+from .types import ImageRequest, ProviderFailureReason
 
 
 class CodexProvider(CliProvider):

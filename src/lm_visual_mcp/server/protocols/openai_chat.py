@@ -7,6 +7,7 @@ replacement text starts with the staged image's absolute path.
 from __future__ import annotations
 
 import json
+from typing import Optional
 
 from ...errors import MediaError
 from ...media import MediaService
@@ -19,6 +20,12 @@ class OpenAIChatAdapter(ProtocolAdapter):
 
     def has_image(self, body: bytes) -> bool:
         return b'"image_url"' in body
+
+    def model_of(self, body: bytes) -> Optional[str]:
+        try:
+            return json.loads(body).get("model")
+        except (ValueError, UnicodeDecodeError):
+            return None
 
     def extract(self, body: bytes, media: MediaService) -> Extracted:
         doc = json.loads(body)

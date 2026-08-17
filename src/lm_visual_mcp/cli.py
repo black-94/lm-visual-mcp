@@ -94,34 +94,42 @@ def _serve(cfg, config_path: Optional[str], start_server: bool) -> int:
 
 
 def doctor(cfg, *, probe: bool = False) -> int:
+    from .providers import build_router
     from .server.lifecycle import probe_server
-    from .vision.providers import PROVIDER_TYPES
-    from .vision.router import VisionRouter
-    from .vision.service import VisionService
 
     print("Vision MCP")
     print()
     host, port = cfg.server.host, cfg.server.port
     print(f"Server {host}:{port}: {'healthy' if probe_server(host, port) else 'not running'}")
-    print(f"  image_hook: {'enabled' if cfg.server.image_hook.enabled else 'disabled'}")
-    print(f"  classifier_hook: {'enabled' if cfg.server.classifier_hook.enabled else 'disabled'}")
+    print(f"  image hook: {'enabled' if cfg.hooks.image.enabled else 'disabled'}")
+    if cfg.hooks.image.models:
+        print(f"  image hook models: {', '.join(cfg.hooks.image.models)}")
+    print(f"  classifier hook: {'enabled' if cfg.hooks.classifier.enabled else 'disabled'}")
+    if cfg.hooks.classifier.models:
+        print(f"  classifier hook models: {', '.join(cfg.hooks.classifier.models)}")
     print()
-    print("Provider chain (fallback order):")
-    print("  " + " -> ".join(e.name for e in cfg.vision.providers if e.enabled))
+    print("IMAGE chain (fallback order):   " + " -> ".join(cfg.vision.image_chain))
+    print("CLASSIFIER chain (first changed): " + " -> ".join(cfg.vision.classifier_chain))
     print()
-    for entry in cfg.vision.providers:
-        print(f"{entry.name} (type={entry.type})")
-        print(f"  enabled: {'yes' if entry.enabled else 'no'}")
+    for entry in cfg.providers:
+        print(f"{entry.name} (type={entry.type}, enabled={'yes' if entry.enabled else 'no'})")
+        if entry.mode:
+            print(f"  mode: {entry.mode}")
         rl = entry.rate_limit
         if rl.rpm is not None or rl.concurrency is not None:
             print(f"  rate_limit: rpm={rl.rpm} concurrency={rl.concurrency}")
-        if entry.type == "gemini":
-            key = entry.effective_api_key("GEMINI_API_KEY")
+        if entry.type in ("gemini", "opencode", "volcengine"):
+            default_env = {
+                "gemini": "GEMINI_API_KEY",
+                "opencode": "OPENCODE_API_KEY",
+                "volcengine": "VOLCENGINE_API_KEY",
+            }[entry.type]
+            key = entry.effective_api_key(default_env)
             print(f"  API key: {'configured' if key else 'not configured'}")
-        elif entry.type == "opencode":
-            key = entry.effective_api_key("OPENCODE_API_KEY")
-            print(f"  API key: {'configured' if key else 'not configured'}")
-            print(f"  base_url: {entry.base_url or 'default'}")
+            if entry.base_url:
+                print(f"  base_url: {entry.base_url}")
+            if entry.disable_thinking is not None:
+                print(f"  disable_thinking: {entry.disable_thinking}")
         else:
             exe = _which(entry.command or entry.type)
             print(f"  executable: {exe or 'not found'}")
@@ -145,10 +153,9 @@ def _probe_chain(cfg) -> None:
     """Probe each configured provider's availability (no vision call)."""
     import asyncio
 
-    from .vision.providers import build_chain
-    from .vision.router import VisionRouter
+    from .providers import build_router
 
-    router = VisionRouter(build_chain(cfg.vision))
+    router = build_router(cfg)
 
     async def run():
         return await router.status()

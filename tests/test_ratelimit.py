@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lm_visual_mcp.vision.providers.ratelimit import RateLimiter
+from lm_visual_mcp.providers.ratelimit import RateLimiter
 
 
 class FakeClock:

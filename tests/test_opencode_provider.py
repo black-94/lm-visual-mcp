@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from lm_visual_mcp.errors import ProviderUnavailableError
-from lm_visual_mcp.vision.providers.opencode import OpenCodeProvider
-from lm_visual_mcp.vision.types import ImageRequest, ProviderFailureReason
+from lm_visual_mcp.providers.opencode import OpenCodeProvider
+from lm_visual_mcp.providers.types import ImageRequest, ProviderFailureReason
 
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -58,7 +58,7 @@ def ok_body(text: str) -> bytes:
 async def test_success_parses_json(tmp_path):
     session = FakeSession([FakeResponse(200, ok_body('{"summary":"s","answer":"a"}'))])
     p = OpenCodeProvider(api_key="k", session=session)
-    result = await p.analyze(make_request(tmp_path))
+    result = await p.analyze_image(make_request(tmp_path))
     assert result.provider == "opencode"
     assert result.result["answer"] == "a"
     req = session.requests[0]
@@ -74,7 +74,7 @@ async def test_quota_error_classified(tmp_path):
     session = FakeSession([FakeResponse(429, b'{"error":"rate"}')])
     p = OpenCodeProvider(api_key="k", session=session)
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path))
+        await p.analyze_image(make_request(tmp_path))
     assert ei.value.reason == ProviderFailureReason.QUOTA_EXHAUSTED
 
 
@@ -82,25 +82,25 @@ async def test_auth_error_classified(tmp_path):
     session = FakeSession([FakeResponse(401, b"unauthorized")])
     p = OpenCodeProvider(api_key="bad", session=session)
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path))
+        await p.analyze_image(make_request(tmp_path))
     assert ei.value.reason == ProviderFailureReason.NOT_AUTHENTICATED
 
 
 async def test_missing_key_unavailable():
     p = OpenCodeProvider(api_key=None)
-    status = await p.probe()
+    status = await p.probe_image()
     assert status.available is False
     assert status.reason == ProviderFailureReason.API_KEY_MISSING
 
 
 async def test_rate_limited_by_own_limiter(tmp_path):
     clock = {"now": 0.0}
-    from lm_visual_mcp.vision.providers.ratelimit import RateLimiter
+    from lm_visual_mcp.providers.ratelimit import RateLimiter
 
     limiter = RateLimiter(rpm=1, clock=lambda: clock["now"])
     session = FakeSession([FakeResponse(200, ok_body('{"answer":"a"}'))])
     p = OpenCodeProvider(api_key="k", session=session, limiter=limiter)
-    await p.analyze(make_request(tmp_path))
+    await p.analyze_image(make_request(tmp_path))
     with pytest.raises(ProviderUnavailableError) as ei:
-        await p.analyze(make_request(tmp_path))
+        await p.analyze_image(make_request(tmp_path))
     assert ei.value.reason == ProviderFailureReason.RATE_LIMITED

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lm_visual_mcp.vision.schema import normalize_result
+from lm_visual_mcp.providers.schema import normalize_result
 
 
 def test_unknown_enum_types_coerced_to_other():

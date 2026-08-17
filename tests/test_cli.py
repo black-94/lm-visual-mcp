@@ -28,5 +28,5 @@ def test_start_server_env_resolution(monkeypatch):
 def test_doctor_runs_without_server(capsys):
     assert main(["--no-start-server", "doctor"]) == 0
     out = capsys.readouterr().out
-    assert "Provider chain" in out
+    assert "IMAGE chain" in out and "CLASSIFIER chain" in out
     assert "rate_limit" in out or "model" in out

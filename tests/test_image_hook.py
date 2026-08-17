@@ -21,7 +21,7 @@ class FakeVision:
         self.describe_calls: list = []
         self.router = type("R", (), {"providers": []})()
 
-    async def describe(self, images, timeout=None):
+    async def describe(self, images, timeout=None, *, model=None, source_protocol=None):
         self.describe_calls.append(len(images))
         return [f"description-of-{i}" for i in range(len(images))], "fake"
 

@@ -10,17 +10,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from ...errors import ProviderUnavailableError
-from ..schema import normalize_result
-from ..types import (
+from ..errors import ProviderUnavailableError
+from .base import Provider
+from .classifier import (
+    disable_auto_classifier_thinking,
+    normalize_auto_classifier_response,
+)
+from .ratelimit import RateLimiter
+from .schema import normalize_result
+from .types import (
     ImageRequest,
     ProviderFailureReason,
+    ProviderRequest,
+    ProviderResponse,
     ProviderResult,
     ProviderStatus,
     ProviderUsage,
 )
-from .base import Provider
-from .ratelimit import RateLimiter
 
 DEFAULT_MODEL = "gemini-2.0-flash"
 
@@ -35,6 +41,7 @@ class GeminiProvider(Provider):
         effort: Optional[str] = None,
         api_key: Optional[str] = None,
         timeout: float = 120.0,
+        disable_thinking: Optional[bool] = None,
         client=None,
         limiter: Optional[RateLimiter] = None,
     ) -> None:
@@ -43,6 +50,7 @@ class GeminiProvider(Provider):
         self.effort = effort
         self._api_key = api_key
         self.timeout = timeout
+        self.disable_thinking = disable_thinking
         # client injectable for tests.
         self._client = client
 
@@ -55,7 +63,7 @@ class GeminiProvider(Provider):
         return genai.Client(api_key=self._api_key)
 
     # -- probe -------------------------------------------------------------
-    async def probe(self, request: Optional[ImageRequest] = None) -> ProviderStatus:
+    async def probe_image(self, request: Optional[ImageRequest] = None) -> ProviderStatus:
         if not self._api_key:
             return ProviderStatus(
                 name=self.name,
@@ -71,7 +79,7 @@ class GeminiProvider(Provider):
         )
 
     # -- analyze -----------------------------------------------------------
-    async def _analyze(self, request: ImageRequest) -> ProviderResult:
+    async def _analyze_image(self, request: ImageRequest) -> ProviderResult:
         if not self._api_key:
             raise ProviderUnavailableError(
                 ProviderFailureReason.API_KEY_MISSING,
@@ -129,7 +137,7 @@ class GeminiProvider(Provider):
             response_mime_type="application/json",
         )
         if request.output_schema:
-            config.response_schema = request.output_schema
+            config.response_schema = _gemini_schema(request.output_schema)
         if self.effort:
             _EFFORT_MAP = {"low": "LOW", "medium": "MEDIUM", "high": "HIGH", "xhigh": "HIGH"}
             level = _EFFORT_MAP.get(self.effort.lower(), self.effort.upper())
@@ -175,6 +183,36 @@ class GeminiProvider(Provider):
         return ProviderUnavailableError(
             ProviderFailureReason.TEMPORARY_FAILURE, f"gemini request failed"
         )
+
+
+# -- classifier ----------------------------------------------------------
+    async def rewrite_classifier_request(
+        self, request: ProviderRequest
+    ) -> tuple[bytes, bool]:
+        if not self.disable_thinking:
+            return request.body, False
+        return disable_auto_classifier_thinking(request.body)
+
+    async def rewrite_classifier_response(
+        self, response: ProviderResponse
+    ) -> tuple[bytes, bool]:
+        return normalize_auto_classifier_response(response.body)
+
+
+def _gemini_schema(schema: dict) -> dict:
+    """Sanitize a JSON Schema for the Gemini Developer API ``response_schema``.
+
+    The shared ``VISION_RESULT_SCHEMA`` (and describe schema) carry
+    ``additionalProperties``; Gemini's Developer API rejects that keyword
+    outright (it is Enterprise-Platform-only) and would error with a schema
+    that is otherwise valid. Strip it recursively so the shared schema can be
+    used directly, mirroring codex's strict ``build_codex_schema``.
+    """
+    if isinstance(schema, dict):
+        return {k: _gemini_schema(v) for k, v in schema.items() if k != "additionalProperties"}
+    if isinstance(schema, list):
+        return [_gemini_schema(item) for item in schema]
+    return schema
 
 
 def _safe_getattr(obj, name, default=None):
