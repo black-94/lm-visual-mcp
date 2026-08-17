@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .errors import ConfigError, MediaError
+from .errors import MediaError
+from .paths import RUNTIME_DIR
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
 IMAGE_MIMES = {
@@ -190,27 +191,21 @@ class Workspace:
 
 
 class WorkspaceManager:
-    """Creates and reaps per-task workspaces.
+    """Creates per-task workspaces, always rooted under the runtime dir.
 
-    ``base`` is the configured ``vision.workdir`` (may be ``None``).
+    Every task gets ``RUNTIME_DIR/<uuid>`` (single root, one predictable place
+    for the media, outputs and schema). Workspaces are *retained* after a task:
+    the absolute image paths written into rewritten prompts stay valid, and a
+    bounded GC reclaims old ones (see ``gc_runtime``).
     """
 
     def __init__(self, base: Optional[Path] = None) -> None:
-        self.base = base.expanduser().resolve() if base else None
+        chosen = base.expanduser().resolve() if base else None
+        self.base = chosen or RUNTIME_DIR
 
     def create(self) -> Workspace:
-        if self.base is None:
-            root = Path(tempfile.mkdtemp(prefix="lm-visual-mcp-"))
-            return Workspace(
-                root=root,
-                input_dir=root / "input",
-                output_dir=root / "output",
-                schema_path=root / "schema.json",
-                _temporary=True,
-            )
-        if not self.base.is_dir():
-            raise ConfigError(f"workdir is not a directory: {self.base}")
-        task = self.base / ".lm-visual-mcp" / str(uuid.uuid4())
+        self.base.mkdir(parents=True, exist_ok=True)
+        task = self.base / str(uuid.uuid4())
         return Workspace(
             root=task,
             input_dir=task / "input",

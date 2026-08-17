@@ -29,10 +29,10 @@ from .vision.types import ProviderFailureReason
 
 CONFIG_VERSION = 2
 
-# Default config file search paths (first existing wins).
+# Default config file search paths (first existing wins): an in-cwd config
+# outranks the user-level one. The legacy `config.yaml` name is no longer read.
 DEFAULT_CONFIG_CANDIDATES = (
     Path("lm-visual-mcp.yaml"),
-    Path("~/.config/lm-visual-mcp/config.yaml").expanduser(),
     Path("~/.config/lm-visual-mcp/lm-visual-mcp.yaml").expanduser(),
 )
 
@@ -95,7 +95,6 @@ class FallbackConfig(pd.BaseModel):
 class VisionConfig(pd.BaseModel):
     timeout: float = 120.0
     max_concurrency: int = 2
-    workdir: Optional[str] = None
     fallback: FallbackConfig = pd.Field(default_factory=FallbackConfig)
     providers: list[ProviderEntryConfig] = pd.Field(
         default_factory=lambda: [
@@ -252,8 +251,6 @@ class ConfigLoader:
             vision["timeout"] = float(e("TIMEOUT"))
         if e("MAX_CONCURRENCY"):
             vision["max_concurrency"] = int(e("MAX_CONCURRENCY"))
-        if e("WORKDIR"):
-            vision["workdir"] = e("WORKDIR")
 
         if e("LOG_LEVEL"):
             data.setdefault("logging", {})["level"] = e("LOG_LEVEL")

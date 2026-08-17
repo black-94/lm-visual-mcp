@@ -22,7 +22,7 @@ class FakeVision:
         self.router = type("R", (), {"providers": []})()
 
     async def describe(self, images, timeout=None):
-        self.describe_calls.append(images)
+        self.describe_calls.append(len(images))
         return [f"description-of-{i}" for i in range(len(images))], "fake"
 
 
@@ -32,7 +32,10 @@ def make_hook(tmp_path: Path) -> tuple[ImageHook, FakeVision]:
     vision = FakeVision()
     media = MediaService(workdir=tmp_path / "media")
     hook = ImageHook(
-        media=media, vision=vision, cache=VisionCache(), adapters=build_registry()
+        media=media,
+        vision=vision,
+        cache=VisionCache(directory=tmp_path / "desc"),  # isolated, not the real runtime dir
+        adapters=build_registry(),
     )
     return hook, vision
 

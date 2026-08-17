@@ -25,11 +25,9 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import AppConfig
+from ..paths import PIDFILE
 
 logger = logging.getLogger("lm_visual_mcp.server.lifecycle")
-
-#: Where the server writes its PID (used for diagnosis / cleanup).
-PIDFILE = Path("~/.cache/lm-visual-mcp/server.pid").expanduser()
 
 
 def server_pidfile() -> Path:

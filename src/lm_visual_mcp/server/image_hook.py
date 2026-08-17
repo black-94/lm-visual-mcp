@@ -35,7 +35,9 @@ class ImageHook(Hook):
     ) -> None:
         self.media = media
         self.vision = vision
-        self.cache = cache or VisionCache()
+        # NB: not `cache or VisionCache()` - an empty cache is falsy via
+        # __len__ == 0, which would silently discard the caller's cache.
+        self.cache = cache if cache is not None else VisionCache()
         self.adapters = adapters or {}
         self.timeout = timeout
 
@@ -44,8 +46,12 @@ class ImageHook(Hook):
         if adapter is None or not adapter.has_image(ctx.body):
             return HookResult.passthrough()
 
+        # Media is per-request: the server wiring injects a MediaService bound
+        # to this request's workspace input dir. Fall back to the shared one
+        # only when a per-request service wasn't provisioned (e.g. tests).
+        media = ctx.state.get("media_service") or self.media
         try:
-            extracted = adapter.extract(ctx.body, self.media)
+            extracted = adapter.extract(ctx.body, media)
         except Exception as exc:  # noqa: BLE001 - fall back to transparent passthrough
             logger.warning("image hook parse failed; forwarding raw: %s", exc)
             return HookResult.passthrough()
@@ -82,5 +88,9 @@ class ImageHook(Hook):
             for k, i in enumerate(missed):
                 txt = results[k] if k < len(results) else ""
                 descs[i] = txt
-                await self.cache.aput(self.cache.key_of_file(slots[i].image.local_path), txt)
+                await self.cache.aput(
+                    self.cache.key_of_file(slots[i].image.local_path),
+                    txt,
+                    provider=provider_chain,
+                )
         return descs

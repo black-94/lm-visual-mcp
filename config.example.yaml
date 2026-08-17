@@ -24,7 +24,7 @@ vision:
   timeout: 120
   # Requests beyond this queue inside the shared server.
   max_concurrency: 2
-  # workdir: /path/to/dir   # default: per-request temp dirs
+  # Workspaces are fixed at ~/.cache/lm-visual-mcp/<uuid> - not configurable.
 
   fallback:
     enabled: true

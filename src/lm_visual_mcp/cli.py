@@ -18,6 +18,7 @@ from typing import Optional
 
 from . import __version__
 from .config import load_config
+from .paths import RUNTIME_DIR
 
 logger = logging.getLogger("lm_visual_mcp")
 
@@ -128,7 +129,7 @@ def doctor(cfg, *, probe: bool = False) -> int:
         print(f"  effort: {entry.effort or 'default'}")
         print()
     print("Runtime")
-    print(f"  workdir: {cfg.vision.workdir or 'temporary'}")
+    print(f"  workspace root: {RUNTIME_DIR} (per-task <uuid>/ subdirs)")
     print(f"  timeout: {cfg.vision.timeout}")
     print(f"  max_concurrency: {cfg.vision.max_concurrency}")
     print()

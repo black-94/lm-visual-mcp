@@ -42,9 +42,10 @@ _DESCRIBE_USER = (
 class VisionService:
     def __init__(self, cfg: AppConfig, router: Optional[VisionRouter] = None) -> None:
         self.cfg = cfg
-        self.workspaces = WorkspaceManager(
-            base=Path(cfg.vision.workdir) if cfg.vision.workdir else None
-        )
+        # Zero-arg WorkspaceManager: every task's workspace is rooted at
+        # RUNTIME_DIR/<uuid>. Workspaces are retained (GC reclaims them) so the
+        # absolute image paths referenced later stay valid.
+        self.workspaces = WorkspaceManager()
         if router is None:
             from .providers import build_chain
 
@@ -99,8 +100,6 @@ class VisionService:
                 return self._error_envelope(exc)
             except (MediaError, VisionError) as exc:
                 return self._error_envelope(exc)
-            finally:
-                workspace.cleanup()
 
     # -- describe (server image hook) ----------------------------------------
     async def describe(self, images: list[ImageInput], timeout: Optional[float] = None) -> tuple[list[str], str]:

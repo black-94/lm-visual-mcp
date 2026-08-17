@@ -27,9 +27,10 @@ from aiohttp import web
 
 from .. import __version__
 from ..config import AppConfig
-from ..media import MediaService
+from ..media import MediaService, WorkspaceManager
 from ..vision.service import VisionService
 from .cache import VisionCache
+from ..paths import RUNTIME_DIR
 from .classifier_hook import ClassifierHook
 from .hooks import HookContext, HookPipeline, HookResponse
 from .image_hook import ImageHook
@@ -62,10 +63,6 @@ _MAX_BODY_BYTES = 100 * 1024 * 1024
 _LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOG_BACKUP_COUNT = 3
 
-#: Persistent media cache: staged proxy images live here, hash-named, so the
-#: absolute paths written into rewritten prompts stay valid indefinitely.
-MEDIA_CACHE_DIR = Path("~/.cache/lm-visual-mcp/media").expanduser()
-
 
 class ProxyError(Exception):
     def __init__(self, status: int, message: str) -> None:
@@ -85,13 +82,18 @@ class VisionServerApp:
     ) -> None:
         self.cfg = cfg
         self.vision = vision or VisionService(cfg)
-        self._media_workdir = MEDIA_CACHE_DIR
-        self._media_workdir.mkdir(parents=True, exist_ok=True)
+        # Per-task workspaces: each image-bearing proxy request gets its own
+        # RUNTIME_DIR/<uuid> workspace so media lands in a single predictable
+        # directory. Workspaces are retained (GC reclaims them) so the absolute
+        # paths written into rewritten prompts stay valid for later use.
+        self._workspaces = WorkspaceManager()
+        # Fallback MediaService for hook code paths that didn't get a
+        # per-request service via ctx.state (e.g. tests constructing the hook
+        # directly). No global media cache anymore - media is per-request.
         self.media = MediaService(
             max_image_mb=cfg.media.max_image_mb,
             download_timeout=cfg.media.download_timeout,
             max_download_mb=cfg.media.max_download_mb,
-            workdir=self._media_workdir,
         )
         self.cache = VisionCache()
         self._adapters = adapters or build_adapter_registry()
@@ -114,6 +116,16 @@ class VisionServerApp:
         if scfg.classifier_hook.enabled:
             hooks.append(ClassifierHook(disable_thinking=scfg.classifier_hook.disable_thinking))
         return HookPipeline(hooks)
+
+    def _make_request_media(self, workdir: Path) -> MediaService:
+        """Build a MediaService bound to one request's workspace input dir."""
+        m = self.cfg.media
+        return MediaService(
+            max_image_mb=m.max_image_mb,
+            download_timeout=m.download_timeout,
+            max_download_mb=m.max_download_mb,
+            workdir=workdir,
+        )
 
     # -- aiohttp -----------------------------------------------------------
     def build(self) -> web.Application:
@@ -183,12 +195,26 @@ class VisionServerApp:
         body = await request.read()
         model = _model_of(body)
 
+        state = {"protocol": proto}
+        # Give image-bearing requests their own retained workspace so any media
+        # they carry lands in a single predictable RUNTIME_DIR/<uuid> directory
+        # (the absolute paths written into rewritten prompts stay valid).
+        adapter = self._adapters.get(proto)
+        if adapter is not None:
+            try:
+                if adapter.has_image(body):
+                    ws = self._workspaces.create()
+                    state["workspace"] = ws
+                    state["media_service"] = self._make_request_media(ws.input_dir)
+            except Exception:  # noqa: BLE001 - never break the proxy for media setup
+                logger.exception("per-request media setup failed; forwarding raw")
+
         ctx = HookContext(
             method=request.method,
             url=target if not suffix else target.rstrip("/") + suffix,
             headers=dict(request.headers),
             body=body,
-            state={"protocol": proto},
+            state=state,
         )
         intercepted = await self.pipeline.run(ctx)
         if intercepted is not None:
@@ -327,8 +353,17 @@ def run_server(cfg: AppConfig) -> int:
         logger.info("server port %s:%s already in use; exiting", cfg.server.host, cfg.server.port)
         return 0
     from .lifecycle import server_pidfile, write_pidfile
+    from ..paths import gc_runtime
 
     write_pidfile(server_pidfile())
+    # Reclaim stale retained workspaces / description entries on boot. Best-effort;
+    # never fail startup over cleanup.
+    try:
+        removed = gc_runtime()
+        if removed["workspaces"] or removed["descriptions"]:
+            logger.info("gc_runtime reclaimed %s", removed)
+    except OSError:
+        logger.warning("gc_runtime failed; continuing", exc_info=True)
     logger.info(
         "vision server listening on %s:%s (hooks and providers: see /health)",
         cfg.server.host,
