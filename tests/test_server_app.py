@@ -87,6 +87,32 @@ async def test_vision_analyze_rejects_bad_payload():
         await client.close()
 
 
+async def test_vision_analyze_multi_image_is_single_call():
+    """Two images in one MCP request -> exactly one upstream vision call.
+
+    The provider chain receives both images in a single batched request, never
+    one call per image, so a multi-image tool (ui_diff_check) costs one pass.
+    """
+    app, vision = make_app()
+    client = TestClient(TestServer(app.build()))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/vision/analyze",
+            json={
+                "tool": "ui_diff_check",
+                "image_sources": ["/tmp/a.png", "/tmp/b.png"],
+                "user_prompt": "diff",
+            },
+        )
+        assert resp.status == 200
+        assert len(vision.calls) == 1  # single upstream call for both images
+        assert vision.calls[0]["tool"] == "ui_diff_check"
+        assert vision.calls[0]["image_sources"] == ["/tmp/a.png", "/tmp/b.png"]
+    finally:
+        await client.close()
+
+
 async def test_proxy_unknown_path_404():
     app, _ = make_app()
     client = TestClient(TestServer(app.build()))

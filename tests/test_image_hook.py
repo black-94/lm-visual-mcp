@@ -40,24 +40,26 @@ def make_hook(tmp_path: Path) -> tuple[ImageHook, FakeVision]:
     return hook, vision
 
 
-def anthropic_body() -> bytes:
+def anthropic_body(n: int = 1, datas: list[bytes] | None = None) -> bytes:
+    blobs = datas if datas is not None else [_PNG] * n
+    image_blocks = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.b64encode(blobs[i]).decode(),
+            },
+        }
+        for i in range(n)
+    ]
     return json.dumps(
         {
             "model": "claude-x",
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": "look"},
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": base64.b64encode(_PNG).decode(),
-                            },
-                        },
-                    ],
+                    "content": [{"type": "text", "text": "look"}, *image_blocks],
                 }
             ],
         }
@@ -83,6 +85,44 @@ async def test_anthropic_image_rewritten_with_absolute_path(tmp_path):
     assert Path(path).exists()
     assert "description-of-0" in text
     assert vision.describe_calls  # one batched describe call
+
+
+async def test_multi_image_batched_single_describe(tmp_path):
+    """A request with several images costs one batched describe call."""
+    hook, vision = make_hook(tmp_path)
+    body = anthropic_body(n=2)
+    c = HookContext(method="POST", url="http://up", headers={}, body=body,
+                    state={"protocol": "anthropic"})
+    result = await hook.process(c)
+    assert result.action == "continue" and result.body is not None
+    # exactly one describe call, with *both* images in it (never one-per-image).
+    assert vision.describe_calls == [2]
+    doc = json.loads(result.body)
+    blocks = doc["messages"][0]["content"]
+    assert sum(1 for b in blocks if b["type"] == "text" and "[Image" in b["text"]) == 2
+
+
+async def test_multi_image_cache_misses_only_described_once(tmp_path):
+    """With one of two images already cached, only the missing one is described."""
+    hook, vision = make_hook(tmp_path)
+    # Image 0 = the cached PNG; image 1 differs by one byte (distinct key).
+    other = _PNG[:-4] + b"\x00\x00\x00\x00"
+    # Warm the cache with image 0 alone.
+    first = await hook.process(HookContext(
+        method="POST", url="http://up", headers={}, body=anthropic_body(n=1, datas=[_PNG]),
+        state={"protocol": "anthropic"},
+    ))
+    assert first.action == "continue"
+    before = len(vision.describe_calls)
+
+    second = await hook.process(HookContext(
+        method="POST", url="http://up", headers={}, body=anthropic_body(n=2, datas=[_PNG, other]),
+        state={"protocol": "anthropic"},
+    ))
+    assert second.action == "continue"
+    # Image 0 is served from cache; only image 1 is a miss, batched into one call.
+    assert len(vision.describe_calls) == before + 1
+    assert vision.describe_calls[-1] == 1  # a single image in that batched call
 
 
 async def test_second_request_hits_cache(tmp_path):
